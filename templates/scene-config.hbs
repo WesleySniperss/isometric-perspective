@@ -52,5 +52,76 @@
         </div>
         <p class="hint">{{localize 'isometric-perspective.custom_projection_hint'}}  <a href='https://github.com/arlosmolten/isometric-perspective/wiki/2.-Advanced-Features#2-custom-isometric-projection'>Manual</a> &  <a href='https://arlosmolten.github.io/isometric-perspective/'>Website</a></p>
     </div>
+
+    <!-- Vanishing Point Perspective -->
+    <div class="perspective-container hidden">
+        <p class="hint">{{localize 'isometric-perspective.scene_perspective_intro'}}</p>
+
+        <div class="form-group">
+            <label for="{{rootId}}-isometric-perspective-perspective-warp-map">{{localize 'isometric-perspective.scene_perspective_warp_map_name'}}</label>
+            <input id="{{rootId}}-isometric-perspective-perspective-warp-map" type="checkbox" name="flags.isometric-perspective.perspectiveWarpMap" {{checked document.flags.isometric-perspective.perspectiveWarpMap}}/>
+        </div>
+        <p class="hint">{{localize 'isometric-perspective.scene_perspective_warp_map_hint'}}</p>
+
+        <div class="form-group">
+            <label for="{{rootId}}-isometric-perspective-perspective-tilt">{{localize 'isometric-perspective.scene_perspective_tilt_name'}}</label>
+            <div class="form-fields">
+                <range-picker id="{{rootId}}-isometric-perspective-perspective-tilt" name="flags.isometric-perspective.perspectiveTilt" value="{{document.flags.isometric-perspective.perspectiveTilt}}" min="0" max="85" step="1"></range-picker>
+            </div>
+            <p class="hint">{{localize 'isometric-perspective.scene_perspective_tilt_hint'}}</p>
+        </div>
+
+        <div class="form-group">
+            <label for="{{rootId}}-isometric-perspective-perspective-rotation">{{localize 'isometric-perspective.scene_perspective_rotation_name'}}</label>
+            <div class="form-fields">
+                <range-picker id="{{rootId}}-isometric-perspective-perspective-rotation" name="flags.isometric-perspective.perspectiveRotation" value="{{document.flags.isometric-perspective.perspectiveRotation}}" min="-180" max="180" step="1"></range-picker>
+            </div>
+            <p class="hint">{{localize 'isometric-perspective.scene_perspective_rotation_hint'}}</p>
+        </div>
+
+        <div class="form-group">
+            <label for="{{rootId}}-isometric-perspective-perspective-fov">{{localize 'isometric-perspective.scene_perspective_fov_name'}}</label>
+            <div class="form-fields">
+                <range-picker id="{{rootId}}-isometric-perspective-perspective-fov" name="flags.isometric-perspective.perspectiveFov" value="{{document.flags.isometric-perspective.perspectiveFov}}" min="0" max="150" step="1"></range-picker>
+            </div>
+            <p class="hint">{{localize 'isometric-perspective.scene_perspective_fov_hint'}}</p>
+        </div>
+
+        <div class="form-group">
+            <label for="{{rootId}}-isometric-perspective-perspective-scale">{{localize 'isometric-perspective.scene_perspective_scale_name'}}</label>
+            <div class="form-fields">
+                <range-picker id="{{rootId}}-isometric-perspective-perspective-scale" name="flags.isometric-perspective.perspectiveScale" value="{{document.flags.isometric-perspective.perspectiveScale}}" min="0.1" max="4" step="0.01"></range-picker>
+            </div>
+            <p class="hint">{{localize 'isometric-perspective.scene_perspective_scale_hint'}}</p>
+        </div>
+
+        <div class="form-group offset-point">
+            <label>{{localize 'isometric-perspective.scene_perspective_position_name'}}</label>
+            <div class="form-fields">
+                <label class="axisX">X</label>
+                <input type="number" name="flags.isometric-perspective.perspectiveOffsetX" value="{{document.flags.isometric-perspective.perspectiveOffsetX}}" placeholder="0" step="1"/>
+                <button type="button" class="fine-adjust perspective-fine-adjust" title="{{localize 'isometric-perspective.scene_perspective_position_mouseover'}}">✥</button>
+                <input type="number" name="flags.isometric-perspective.perspectiveOffsetY" value="{{document.flags.isometric-perspective.perspectiveOffsetY}}" placeholder="0" step="1"/>
+                <label class="axisY">Y</label>
+            </div>
+            <p class="hint">{{localize 'isometric-perspective.scene_perspective_position_hint'}}</p>
+        </div>
+
+        <div class="form-group offset-point">
+            <label>{{localize 'isometric-perspective.scene_perspective_cells_name'}}</label>
+            <div class="form-fields">
+                <input type="number" name="flags.isometric-perspective.perspectiveColumns" value="{{document.flags.isometric-perspective.perspectiveColumns}}" min="1" max="500" step="1"/>
+                <label>×</label>
+                <input type="number" name="flags.isometric-perspective.perspectiveRows" value="{{document.flags.isometric-perspective.perspectiveRows}}" min="1" max="500" step="1"/>
+            </div>
+            <p class="hint">{{localize 'isometric-perspective.scene_perspective_cells_hint'}}</p>
+        </div>
+
+        <div class="form-group">
+            <label for="{{rootId}}-isometric-perspective-perspective-flat-tokens">{{localize 'isometric-perspective.scene_perspective_flat_tokens_name'}}</label>
+            <input id="{{rootId}}-isometric-perspective-perspective-flat-tokens" type="checkbox" name="flags.isometric-perspective.perspectiveFlatTokens" {{checked document.flags.isometric-perspective.perspectiveFlatTokens}}/>
+        </div>
+        <p class="hint">{{localize 'isometric-perspective.scene_perspective_flat_tokens_hint'}}</p>
+    </div>
   </div>
 </section>

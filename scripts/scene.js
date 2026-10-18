@@ -1,6 +1,7 @@
 import { applyIsometricPerspective, applyBackgroundTransformation } from './transform.js';
 import { isometricModuleConfig, updateIsometricConstants, parseCustomProjection, updateCustomProjection, PROJECTION_TYPES, DEFAULT_PROJECTION, CUSTOM_PROJECTION } from './consts.js';
-import { patchConfig} from './utils.js';
+import { patchConfig, createAdjustableButton } from './utils.js';
+import { PERSPECTIVE_PROJECTION, PERSPECTIVE_DEFAULTS, configurePerspective, isPerspectiveActive, applyPerspective, previewPerspective } from './perspective.js';
 
 export function createSceneIsometricTab(){
   
@@ -41,6 +42,12 @@ export function initSceneForm (app, html, context, options){
   const customProjectionInput = html.querySelector('input[name="flags.isometric-perspective.customProjection"]');
   const customProjectionContainer = html.querySelector('.custom-projection-container');
   
+  // perspective options are only shown for the vanishing point projection
+  const perspectiveContainer = html.querySelector('.perspective-container');
+  const togglePerspectiveOptions = (projection) => perspectiveContainer?.classList.toggle('hidden', projection !== PERSPECTIVE_PROJECTION);
+  togglePerspectiveOptions(projectionSelect.value);
+  if (perspectiveContainer) initPerspectiveFields(app, html, perspectiveContainer, projectionSelect);
+
   projectionSelect.addEventListener('change', (event) => {
     if (event.target.value === "Custom Projection"){
       customProjectionInput.disabled = false;
@@ -49,8 +56,67 @@ export function initSceneForm (app, html, context, options){
       customProjectionInput.disabled = true;
       customProjectionContainer.classList.add('hidden');
     }
+    togglePerspectiveOptions(event.target.value);
   });
 
+}
+
+function initPerspectiveFields(app, html, container, projectionSelect) {
+  const scene = app.document;
+  const field = (name) => html.querySelector(`[name="flags.isometric-perspective.${name}"]`);
+
+  // range pickers need an explicit value
+  const sliders = {perspectiveTilt: 'tilt', perspectiveRotation: 'rotation', perspectiveFov: 'fov', perspectiveScale: 'scale'};
+  for (const [name, key] of Object.entries(sliders)) {
+    const input = field(name);
+    if (input) input.value = scene.getFlag(isometricModuleConfig.MODULE_ID, name) ?? PERSPECTIVE_DEFAULTS[key];
+  }
+
+  // an empty grid size covers the whole map
+  const dimensions = scene.dimensions;
+  if (dimensions) {
+    const columns = field('perspectiveColumns');
+    const rows = field('perspectiveRows');
+    if (columns) columns.placeholder = Math.round(dimensions.sceneRect.width / dimensions.size);
+    if (rows) rows.placeholder = Math.round(dimensions.sceneRect.height / dimensions.size);
+  }
+
+  // hold and drag to move the grid by the same distance on screen
+  createAdjustableButton({
+    buttonElement: container.querySelector('.perspective-fine-adjust'),
+    inputs: [field('perspectiveOffsetY'), field('perspectiveOffsetX')],
+    adjustmentScale: () => {
+      const scale = 1 / (canvas.stage?.scale.x || 1);
+      return [-scale, scale];
+    },
+    roundingPrecision: 0
+  });
+
+  // live preview of the unsaved values
+  const readForm = () => ({
+    isometricEnabled: field('isometricEnabled')?.checked,
+    projectionType: projectionSelect.value,
+    perspectiveWarpMap: field('perspectiveWarpMap')?.checked,
+    perspectiveFlatTokens: field('perspectiveFlatTokens')?.checked,
+    perspectiveTilt: field('perspectiveTilt')?.value,
+    perspectiveRotation: field('perspectiveRotation')?.value,
+    perspectiveFov: field('perspectiveFov')?.value,
+    perspectiveScale: field('perspectiveScale')?.value,
+    perspectiveOffsetX: field('perspectiveOffsetX')?.value,
+    perspectiveOffsetY: field('perspectiveOffsetY')?.value,
+    perspectiveColumns: field('perspectiveColumns')?.value,
+    perspectiveRows: field('perspectiveRows')?.value
+  });
+  const preview = () => previewPerspective(scene, readForm());
+  container.addEventListener('input', preview);
+  container.addEventListener('change', preview);
+}
+
+// closing the scene configuration without saving drops the preview
+export function handleCloseSceneConfig(app) {
+  const scene = app.document;
+  if (!canvas.ready || (scene !== canvas.scene) || !isPerspectiveActive()) return;
+  applyPerspective(scene);
 }
 
 export function handleUpdateScene(scene, changes) {
@@ -63,6 +129,7 @@ export function handleUpdateScene(scene, changes) {
     changes.flags?.[isometricModuleConfig.MODULE_ID]?.isometricEnabled !== undefined ||
     changes.flags?.[isometricModuleConfig.MODULE_ID]?.isometricBackground !== undefined ||
     changes.flags?.[isometricModuleConfig.MODULE_ID]?.projectionType !== undefined ||
+    Object.keys(changes.flags?.[isometricModuleConfig.MODULE_ID] ?? {}).some(key => key.includes('perspective')) ||
     changes.grid !== undefined ||
     changes.gridType !== undefined ||
     changes.gridSize !== undefined
@@ -84,12 +151,41 @@ export function handleUpdateScene(scene, changes) {
       }
     }
 
+    // Switching in or out of the perspective view changes how every mesh is built,
+    // so redraw the canvas instead of patching the existing meshes.
+    const wasPerspective = isPerspectiveActive();
+    if (wasPerspective !== configurePerspective(scene)) {
+      canvas.draw();
+      return;
+    }
+
     requestAnimationFrame(() => {
       updateIsometricConstants(projectionType);
       applyIsometricPerspective(scene, isIsometric);
       applyBackgroundTransformation(scene, isIsometric, shouldTransformBackground);
     });
   }
+}
+
+// Set the projection before placeables are drawn, so they are built for the right mode from the start
+export function handleCanvasInit(canvas) {
+  const scene = canvas.scene;
+  if (!scene) return;
+
+  const projectionType = scene.getFlag(isometricModuleConfig.MODULE_ID, "projectionType") ?? DEFAULT_PROJECTION;
+  if (projectionType === 'Custom Projection') {
+    const customProjectionValue = scene.getFlag(isometricModuleConfig.MODULE_ID, "customProjection");
+    if (customProjectionValue) {
+      try {
+        updateCustomProjection(parseCustomProjection(customProjectionValue));
+      } catch (error) {
+        console.error("Error parsing custom projection:", error);
+      }
+    }
+  }
+
+  updateIsometricConstants(projectionType);
+  configurePerspective(scene);
 }
 
 export async function handleCanvasReady(canvas) {

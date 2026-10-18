@@ -1,5 +1,6 @@
 import { isometricModuleConfig } from './consts.js';
 import { ISOMETRIC_CONST, PROJECTION_TYPES, DEFAULT_PROJECTION } from './consts.js';
+import { isPerspectiveActive } from './perspective.js';
 
 export function registerHUDConfig() {
 
@@ -10,7 +11,8 @@ export function handleRenderTokenHUD(hud, html, data) {
   const isSceneIsometric = scene.getFlag(isometricModuleConfig.MODULE_ID, "isometricEnabled");
   const isometricWorldEnabled = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag");
 
-  if (isometricWorldEnabled && isSceneIsometric) {
+  // Perspective scenes keep the stage top-down, so the default position is already right
+  if (isometricWorldEnabled && isSceneIsometric && !isPerspectiveActive()) {
     requestAnimationFrame(() => adjustHUDPosition(hud, html));
   }
 }
@@ -20,7 +22,8 @@ export function handleRenderTileHUD(hud, html, data) {
   const isSceneIsometric = scene.getFlag(isometricModuleConfig.MODULE_ID, "isometricEnabled");
   const isometricWorldEnabled = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag");
 
-  if (isometricWorldEnabled && isSceneIsometric) {
+  // Perspective scenes keep the stage top-down, so the default position is already right
+  if (isometricWorldEnabled && isSceneIsometric && !isPerspectiveActive()) {
     requestAnimationFrame(() => adjustHUDPosition(hud, html));
   }
 }
@@ -30,7 +33,8 @@ export function handleRenderDrawingHUD(hud, html, data) {
   const isSceneIsometric = scene.getFlag(isometricModuleConfig.MODULE_ID, "isometricEnabled");
   const isometricWorldEnabled = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag");
 
-  if (isometricWorldEnabled && isSceneIsometric) {
+  // Perspective scenes keep the stage top-down, so the default position is already right
+  if (isometricWorldEnabled && isSceneIsometric && !isPerspectiveActive()) {
     requestAnimationFrame(() => adjustHUDPosition(hud, html));
   }
 }

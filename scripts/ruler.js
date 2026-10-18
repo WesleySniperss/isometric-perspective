@@ -1,5 +1,6 @@
 import { isometricModuleConfig } from './consts.js';
 import { cartesianToIso } from './utils.js';
+import { isPerspectiveActive } from './perspective.js';
 
 /**
  * Helper to apply isometric adjustments to label context.
@@ -14,6 +15,8 @@ function applyIsometricLabelAdjustments(ctx, token) {
   const isIsometric = canvas.scene.getFlag(isometricModuleConfig.MODULE_ID, "isometricEnabled");
   const worldIsoEnabled = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag");
   if (!worldIsoEnabled || !isIsometric) return ctx;
+  // Perspective scenes keep the stage top-down, so the default label position is already correct
+  if (isPerspectiveActive()) return ctx;
 
   // 1. Start with the logical grid position
   let x = ctx.position.x;
@@ -84,6 +87,12 @@ function extendTokenRuler() {
         _getWaypointLabelContext(waypoint, state) {
           const ctx = super._getWaypointLabelContext(waypoint, state);
           return applyIsometricLabelAdjustments(ctx, this.sourceToken);
+        }
+
+        // The square grid spaces of the scene don't match the perspective cells, don't highlight them
+        _getGridHighlightStyle(waypoint, offset) {
+          if (isPerspectiveActive()) return {alpha: 0};
+          return super._getGridHighlightStyle(waypoint, offset);
         }
       }
 

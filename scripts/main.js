@@ -68,7 +68,11 @@ import {
   handleUpdateScene,
   handleCanvasReady,
   handleCanvasResize,
+  handleCanvasInit,
+  handleCloseSceneConfig,
 } from "./scene.js";
+
+import { installPerspectivePatches, clearPerspectiveObjects } from "./perspective.js";
 
 import { registerRuler } from "./ruler.js";
 
@@ -301,6 +305,9 @@ Hooks.on("ready", applyDepthSort);
 //scene management
 Hooks.on("renderSceneConfig", initSceneForm);
 Hooks.on("updateScene", handleUpdateScene);
+Hooks.on("canvasInit", handleCanvasInit);
+Hooks.on("canvasTearDown", clearPerspectiveObjects);
+Hooks.on("closeSceneConfig", handleCloseSceneConfig);
 Hooks.on("canvasReady", handleCanvasReady);
 Hooks.on("canvasResize", handleCanvasResize);
 Hooks.on("canvasReady", applyDepthSort); // required on 1st time scene loading
@@ -339,6 +346,7 @@ Hooks.on("init", () => {
   CONFIG.Token.objectClass = isoDepthSortTokenMixin(CONFIG.Token.objectClass);
   CONFIG.Tile.objectClass = isoDepthSortTileMixin(CONFIG.Tile.objectClass);
   wrapTileTestOcclusion();
+  installPerspectivePatches();
 });
 
 /**

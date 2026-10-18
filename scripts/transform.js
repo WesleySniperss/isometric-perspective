@@ -4,12 +4,27 @@ import {
   getTileGeometry
 } from './utils.js';
 import { ISOMETRIC_CONST } from './consts.js';
+import {
+  isPerspectiveActive,
+  applyPerspective,
+  removePerspective,
+  applyPerspectiveToPlaceable
+} from './perspective.js';
 
 
 // Main function that changes the scene canvas.
 export function applyIsometricPerspective(scene, isSceneIsometric) {
   const isometricWorldEnabled = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag");
-  
+
+  // Vanishing point perspective: the stage stays top-down, the grid and tokens follow a camera (see perspective.js)
+  if (isometricWorldEnabled && isSceneIsometric && ISOMETRIC_CONST.perspective) {
+    canvas.app.stage.rotation = 0;
+    canvas.app.stage.skew.set(0, 0);
+    applyPerspective(scene);
+    return;
+  }
+  removePerspective();
+
   if (isometricWorldEnabled && isSceneIsometric) {
     canvas.app.stage.rotation = ISOMETRIC_CONST.rotation;
     canvas.app.stage.skew.set(
@@ -53,6 +68,13 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
   // Don't make transformation on the token or tile if the scene isn't isometric
   if (!isSceneIsometric) {
     object.mesh.anchor.set(0.5, 0.5);  // This is set to make isometric anchor don't mess with non-iso scenes
+    return;
+  }
+
+  // Perspective scenes: tokens stand upright and shrink with depth, tiles stay flat on the ground
+  if (isPerspectiveActive()) {
+    if (object instanceof canvasToken) removeTokenVisuals(object);
+    applyPerspectiveToPlaceable(object);
     return;
   }
 
@@ -204,7 +226,7 @@ export function applyBackgroundTransformation(scene, isSceneIsometric, shouldTra
   const isometricWorldEnabled = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag");
   const scale = scene.getFlag(isometricModuleConfig.MODULE_ID, "isometricScale") ?? 1;
   
-  if (isometricWorldEnabled && isSceneIsometric && shouldTransform) {
+  if (isometricWorldEnabled && isSceneIsometric && shouldTransform && !ISOMETRIC_CONST.perspective) {
     // Applies isometric rotation
     background.rotation = ISOMETRIC_CONST.reverseRotation;
     background.skew.set(

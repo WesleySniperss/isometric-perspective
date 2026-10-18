@@ -7,6 +7,7 @@ import {
   // debugCanvasLayer,
   toggleAnchorAxis,
 } from "./utils.js";
+import { isPerspectiveActive, applyPerspectiveDepthSort } from "./perspective.js";
 
 export function isoDepthSortTileMixin(Base) {
   return class DepthSortTile extends Base {
@@ -58,6 +59,11 @@ export function isoDepthSortTokenMixin(Base) {
 }
 
 export function applyDepthSort() {
+  if (!canvas.primary) return;
+  if (isPerspectiveActive()) {
+    applyPerspectiveDepthSort();
+    return;
+  }
   const sortList = sortPlaceableByPosition(); //.map(({sprite}) => sprite);
   sortList.reverse();
 

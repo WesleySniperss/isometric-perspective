@@ -60,6 +60,18 @@ export let PROJECTION_TYPES = {
     reverseSkewY:     0,
     ratio:       1.428148006742114
   },
+  // Not an affine projection: the stage stays top-down, see perspective.js
+  'Perspective (Vanishing Point)': {
+    rotation: 0,
+    skewX: 0,
+    skewY: 0,
+    HudAngle: 0,
+    reverseRotation: 0,
+    reverseSkewX: 0,
+    reverseSkewY: 0,
+    ratio: 1,
+    perspective: true
+  },
   'Custom Projection': {
     rotation: 0,
     skewX: 0,
