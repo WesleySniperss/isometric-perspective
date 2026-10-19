@@ -189,6 +189,82 @@ export async function reprojectTokens(previous) {
   if (updates.length) await scene.updateEmbeddedDocuments("Token", updates, { animate: false });
 }
 
+// Tokens keep their cells when a scene enters or leaves the perspective view: outside of it token positions
+// are floor (top-down) positions, inside they are picture positions. Run by the user who changed the scene.
+export async function convertTokenPositions(scene, fromCamera, toCamera) {
+  if (!scene?.dimensions || (!fromCamera && !toCamera)) return;
+  const size = scene.dimensions.size;
+  const updates = [];
+  for (const token of scene.tokens) {
+    const { x, y, width, height } = token._source;
+    const halfX = width * size / 2;
+    const halfY = height * size / 2;
+    let point = { x: x + halfX, y: y + halfY, valid: true };
+    if (fromCamera) point = pictureToFloor(fromCamera, point.x, point.y);
+    if (point.valid && toCamera) point = floorToPicture(toCamera, point.x, point.y);
+    if (!point.valid) continue;
+    let nx = Math.round(point.x - halfX);
+    let ny = Math.round(point.y - halfY);
+    // Back on the top-down grid: undo the rounding of the projection so tokens sit exactly on their cells
+    if (!toCamera) {
+      const align = (value) => {
+        const snapped = Math.round(value / (size / 2)) * (size / 2);
+        return (Math.abs(snapped - value) <= 2) ? snapped : value;
+      };
+      nx = align(nx);
+      ny = align(ny);
+    }
+    if ((nx !== x) || (ny !== y)) updates.push({ _id: token.id, x: nx, y: ny });
+  }
+  if (updates.length) await scene.updateEmbeddedDocuments("Token", updates, { animate: false });
+}
+
+// For other modules, e.g. movement animations that step from cell to cell:
+// game.modules.get("isometric-perspective").api.perspective
+export const perspectiveApi = {
+  isActive: () => state.active,
+
+  // Whether this module sets the size of the token mesh (perspective scenes, standing art), so a size larger
+  // than the document would give is intended
+  managesToken: (token) => state.active || !!token?.mesh?._isoOwnTexture,
+
+  // Centers of the perspective cells a path of token centers (picture px) goes through, one point per step,
+  // or null when the path leaves the floor
+  expandPath(points, token) {
+    if (!state.active || !Array.isArray(points) || (points.length < 2)) return null;
+    const camera = state.saved;
+    const size = canvas.grid.size;
+    const width = token?.document?.width ?? 1;
+    const height = token?.document?.height ?? 1;
+    const toCell = (p) => {
+      const floor = pictureToFloor(camera, p.x, p.y);
+      if (!floor.valid) return null;
+      return {
+        u: snapAxis(floor.x / size, width, camera.column0, camera.columns),
+        v: snapAxis(floor.y / size, height, camera.row0, camera.rows)
+      };
+    };
+    const toPicture = ({ u, v }) => {
+      const p = floorToPicture(camera, u * size, v * size);
+      return { x: p.x, y: p.y };
+    };
+    const result = [];
+    for (let i = 0; i < points.length - 1; i++) {
+      const a = toCell(points[i]);
+      const b = toCell(points[i + 1]);
+      if (!a || !b) return null;
+      if (i === 0) result.push(toPicture(a));
+      let { u, v } = a;
+      while ((Math.abs(b.u - u) > 1e-6) || (Math.abs(b.v - v) > 1e-6)) {
+        u += Math.sign(b.u - u) * Math.min(1, Math.abs(b.u - u));
+        v += Math.sign(b.v - v) * Math.min(1, Math.abs(b.v - v));
+        result.push(toPicture({ u, v }));
+      }
+    }
+    return (result.length >= 2) ? result : null;
+  }
+};
+
 function readNumber(value, fallback) {
   if ((value === null) || (value === undefined) || (value === "")) return fallback;
   const number = Number(value);
@@ -497,6 +573,9 @@ export function installPerspectivePatches() {
   };
 
   Hooks.on("deleteTile", (document) => removeWarpedTile(document.id));
+
+  const module = game.modules.get(isometricModuleConfig.MODULE_ID);
+  if (module) module.api = { ...(module.api ?? {}), perspective: perspectiveApi };
 }
 
 // ----------------- Drawing -----------------
@@ -732,8 +811,12 @@ export function applyPerspectiveToPlaceable(object) {
   const mesh = object.mesh;
   if (!mesh || mesh.destroyed || !mesh.texture) return;
 
-  // Reset the mesh to Foundry's own size/scale for the current document state
+  // Standing tokens can show their own full-height art
   const doc = object.document;
+  const standingTexture = isTokenStanding(object) ? getStandingImage(object) : null;
+  useStandingImage(object, standingTexture);
+
+  // Reset the mesh to Foundry's own size/scale for the current document state
   try {
     if (typeof object._refreshMeshSizeAndScale === 'function') object._refreshMeshSizeAndScale();
     else {
@@ -747,8 +830,63 @@ export function applyPerspectiveToPlaceable(object) {
   }
 
   const artScale = doc.getFlag(isometricModuleConfig.MODULE_ID, 'scale') ?? 1;
-  mesh._isoPerspectiveBase = { x: mesh.scale.x * artScale, y: mesh.scale.y * artScale };
+  if (standingTexture) {
+    // As tall as set in the token (in cells), keeping the proportions of the image
+    const scale = getStandingHeight(object) * canvas.grid.size * artScale / standingTexture.height;
+    mesh._isoPerspectiveBase = {
+      x: scale * Math.sign(doc.texture.scaleX || 1),
+      y: scale * Math.sign(doc.texture.scaleY || 1)
+    };
+  }
+  else mesh._isoPerspectiveBase = { x: mesh.scale.x * artScale, y: mesh.scale.y * artScale };
   placeToken(object, displayPoint(object.center.x, object.center.y));
+}
+
+// ----------------- Standing images -----------------
+
+const standingTextures = new Map();   // src -> PIXI.Texture once loaded, a Promise while loading, null if it failed
+
+// The full-height art of a token for when it stands (its Isometric tab), once loaded
+export function getStandingImage(token) {
+  const MODULE_ID = isometricModuleConfig.MODULE_ID;
+  const src = token.document?.getFlag(MODULE_ID, "perspectiveStandingImage");
+  if (!src) return null;
+  const cached = standingTextures.get(src);
+  if (cached instanceof PIXI.Texture) return cached.valid ? cached : null;
+  if (cached === undefined) {
+    const load = foundry.canvas.loadTexture ?? globalThis.loadTexture;
+    const loading = Promise.resolve(load(src)).then(texture => {
+      standingTextures.set(src, texture ?? null);
+      for (const t of canvas.tokens?.placeables ?? []) {
+        if (t.document.getFlag(MODULE_ID, "perspectiveStandingImage") === src) t.renderFlags.set({ refreshMesh: true, refreshSize: true });
+      }
+    }).catch(() => standingTextures.set(src, null));
+    standingTextures.set(src, loading);
+  }
+  return null;
+}
+
+// Height of the standing art, in cells
+export function getStandingHeight(token) {
+  return Math.clamp(readNumber(token.document?.getFlag(isometricModuleConfig.MODULE_ID, "perspectiveStandingHeight"), 1.5), 0.25, 4);
+}
+
+// Put the standing art on the token mesh, or give the mesh its own texture back. Dynamic rings are left out
+// while the standing art is shown, the ring shader would clip it to the ring.
+export function useStandingImage(token, texture) {
+  const mesh = token.mesh;
+  if (!mesh || mesh.destroyed) return;
+  if (texture) {
+    if (mesh.texture === texture) return;
+    mesh._isoOwnTexture ??= mesh.texture;
+    mesh.texture = texture;
+    if (token.hasDynamicRing) mesh.setShaderClass(foundry.canvas.rendering.shaders.PrimaryBaseSamplerShader);
+    return;
+  }
+  if (!mesh._isoOwnTexture) return;
+  mesh.texture = mesh._isoOwnTexture;
+  delete mesh._isoOwnTexture;
+  token._refreshShader?.();
 }
 
 // Draw a token at a picture point (its feet). `bounce` scales the art, for walk animations of other modules.
@@ -794,6 +932,10 @@ function placeToken(object, center, bounce = 1) {
     mesh.anchor.set(doc.texture.anchorX, doc.texture.anchorY);
     mesh.transform.setFromMatrix(meshMatrix);
     restoreEffects(object);
+    drawFootprint(object, center, (q) => ({
+      x: object.pivot.x + (((J.yy * (q.x - object.position.x)) - (J.xy * (q.y - object.position.y))) / det),
+      y: object.pivot.y + (((J.xx * (q.y - object.position.y)) - (J.yx * (q.x - object.position.x))) / det)
+    }));
     recordPlacement(object, center);
     return;
   }
@@ -825,7 +967,28 @@ function placeToken(object, center, bounce = 1) {
   const top = Math.min(0, artTop);
   object.hitArea = new PIXI.Rectangle(left, top, rightEdge - left, height - top);
   layoutStandingEffects(object, artLeft, artRight, artTop, artHeight);
+  drawFootprint(object, center, (q) => ({
+    x: object.pivot.x + ((q.x - object.position.x) / s),
+    y: object.pivot.y + ((q.y - object.position.y) / s)
+  }));
   recordPlacement(object, center);
+}
+
+// The selection border follows the cells the token stands on, as drawn in perspective.
+// `toLocal` turns a picture point into the token's own coordinates.
+function drawFootprint(object, center, toLocal) {
+  const border = object.border;
+  if (!border || border.destroyed) return;
+  const floor = pictureToFloor(state.current, center.x, center.y);
+  if (!floor.valid) return;
+  const { width, height } = object.document.getSize();
+  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
+    const p = floorToPicture(state.current, floor.x + (sx * width / 2), floor.y + (sy * height / 2));
+    return toLocal(p);
+  });
+  if (corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return;
+  foundry.canvas.borders.drawBorder(border, new PIXI.Polygon(corners.flatMap(p => [p.x, p.y])),
+    { alignment: 1, dashed: object.document.hidden });
 }
 
 // Status effects of a standing token: a column beside the art, from its top down (token-local, unscaled px).
@@ -879,34 +1042,114 @@ let tokenGuardInstalled = false;
 // Movement animations of other modules (Smooth Move...) write the token mesh every frame, turning and
 // resizing it. Right before each render, put changed tokens back on their perspective footing: keep the
 // position the animation chose and its bounce, restore the size of the cell and the upright pose.
-function installTokenGuard() {
+export function installTokenGuard() {
   if (tokenGuardInstalled || !canvas.app?.ticker) return;
   tokenGuardInstalled = true;
   canvas.app.ticker.add(guardTokens, null, PIXI.UPDATE_PRIORITY.LOW + 0.5);
 }
 
 function guardTokens() {
-  if (!state.active || !canvas.ready) return;
+  if (!canvas.ready) return;
   for (const token of getTokens()) {
     const mesh = token.mesh;
-    const placed = mesh?._isoPerspective;
-    if (!placed || mesh.destroyed || token.destroyed) continue;
-    const moved = (mesh.position.x !== placed.mx) || (mesh.position.y !== placed.my);
-    const changed = moved
-      || (mesh.scale.x !== placed.msx) || (mesh.scale.y !== placed.msy) || (mesh.rotation !== placed.mr)
-      || (mesh.skew.x !== placed.mkx) || (mesh.skew.y !== placed.mky)
-      || (token.position.x !== placed.px) || (token.position.y !== placed.py)
-      || (token.scale.x !== placed.sx) || (token.scale.y !== placed.sy)
-      || (token.pivot.x !== placed.vx) || (token.pivot.y !== placed.vy) || (token.rotation !== placed.r);
-    if (!changed) continue;
-
-    // Animations move the mesh to the token center along their path
-    const center = moved ? displayPoint(mesh.position.x, mesh.position.y) : placed.center;
-    const animationBase = token._smActive ? token._smBaseScale?.x : null;
-    let bounce = animationBase ? Math.abs(mesh.scale.x / animationBase) : 1;
-    if (!Number.isFinite(bounce)) bounce = 1;
-    placeToken(token, center, Math.clamp(bounce, 0.5, 2));
+    if (!mesh || mesh.destroyed || token.destroyed) continue;
+    if (state.active) guardPerspectiveToken(token);
+    else if (mesh._isoPlacement) guardIsometricToken(token);
   }
+}
+
+// Only step in for movement animations (Smooth Move owns the mesh while _smActive is set, and its last frame),
+// or when the size was reset from the document outside of a refresh. Other effects on the mesh are left alone.
+function shouldRestore(token) {
+  const animating = !!token._smActive;
+  const justAnimated = !!token._isoWasAnimating;
+  token._isoWasAnimating = animating;
+  return animating || justAnimated || matchesDocumentScale(token);
+}
+
+// The scale Foundry gives the mesh from the document (Token#_refreshMeshSizeAndScale), for the current texture
+function matchesDocumentScale(token) {
+  const mesh = token.mesh;
+  const texture = mesh.texture;
+  if (!texture || (texture.width <= 1) || (texture.height <= 1)) return false;
+  const { width, height } = token.document.getSize();
+  let { fit = "fill", scaleX = 1, scaleY = 1 } = token.document.texture ?? {};
+  if (token.hasDynamicRing && CONFIG.Token.ring?.isGridFitMode) {
+    const adjustment = token.ring?.subjectScaleAdjustment ?? 1;
+    scaleX *= adjustment;
+    scaleY *= adjustment;
+  }
+  const fx = width / texture.width;
+  const fy = height / texture.height;
+  let sx;
+  let sy;
+  switch (fit) {
+    case "cover": sx = sy = Math.max(fx, fy); break;
+    case "contain": sx = sy = Math.min(fx, fy); break;
+    case "width": sx = sy = fx; break;
+    case "height": sx = sy = fy; break;
+    default: sx = fx; sy = fy;
+  }
+  const close = (a, b) => Math.abs(Math.abs(a) - Math.abs(b)) <= (Math.abs(b) * 1e-4);
+  return close(mesh.scale.x, sx * scaleX) && close(mesh.scale.y, sy * scaleY);
+}
+
+function animationBounce(token, axis) {
+  const base = token._smActive ? token._smBaseScale?.[axis] : null;
+  const bounce = base ? Math.abs(token.mesh.scale[axis] / base) : 1;
+  return Number.isFinite(bounce) ? Math.clamp(bounce, 0.5, 2) : 1;
+}
+
+function guardPerspectiveToken(token) {
+  const mesh = token.mesh;
+  const placed = mesh._isoPerspective;
+  if (!placed) return;
+  const moved = (mesh.position.x !== placed.mx) || (mesh.position.y !== placed.my);
+  const changed = moved
+    || (mesh.scale.x !== placed.msx) || (mesh.scale.y !== placed.msy) || (mesh.rotation !== placed.mr)
+    || (mesh.skew.x !== placed.mkx) || (mesh.skew.y !== placed.mky)
+    || (token.position.x !== placed.px) || (token.position.y !== placed.py)
+    || (token.scale.x !== placed.sx) || (token.scale.y !== placed.sy)
+    || (token.pivot.x !== placed.vx) || (token.pivot.y !== placed.vy) || (token.rotation !== placed.r);
+  if (!changed || !shouldRestore(token)) return;
+
+  // Animations move the mesh to the token center along their path
+  const center = moved ? displayPoint(mesh.position.x, mesh.position.y) : placed.center;
+  placeToken(token, center, animationBounce(token, "x"));
+}
+
+// Isometric scenes: keep the upright pose and the isometric size while an animation moves the token
+function guardIsometricToken(token) {
+  const mesh = token.mesh;
+  const p = mesh._isoPlacement;
+  const moved = (mesh.position.x !== p.x) || (mesh.position.y !== p.y);
+  const changed = moved || (mesh.rotation !== p.rotation) || (mesh.skew.x !== p.skewX) || (mesh.skew.y !== p.skewY)
+    || (mesh.scale.x !== p.appliedX) || (mesh.scale.y !== p.appliedY);
+  if (!changed || !shouldRestore(token)) return;
+
+  const center = moved ? { x: mesh.position.x, y: mesh.position.y } : { x: p.x - p.offsetX, y: p.y - p.offsetY };
+  const bounce = animationBounce(token, "y");
+  mesh.rotation = p.rotation;
+  mesh.skew.set(p.skewX, p.skewY);
+  mesh.scale.set(p.scaleX * bounce, p.scaleY * bounce);
+  mesh.anchor.set(p.anchorX, p.anchorY);
+  mesh.position.set(center.x + p.offsetX, center.y + p.offsetY);
+  Object.assign(p, { x: mesh.position.x, y: mesh.position.y, appliedX: mesh.scale.x, appliedY: mesh.scale.y });
+}
+
+// Called by the isometric transformation once a token mesh is in place
+export function recordIsometricPlacement(token) {
+  const mesh = token.mesh;
+  if (!mesh || mesh.destroyed) return;
+  const center = token.center;
+  mesh._isoPlacement = {
+    rotation: mesh.rotation, skewX: mesh.skew.x, skewY: mesh.skew.y,
+    scaleX: mesh.scale.x, scaleY: mesh.scale.y, appliedX: mesh.scale.x, appliedY: mesh.scale.y,
+    anchorX: mesh.anchor.x, anchorY: mesh.anchor.y,
+    offsetX: mesh.position.x - center.x, offsetY: mesh.position.y - center.y,
+    x: mesh.position.x, y: mesh.position.y
+  };
+  installTokenGuard();
 }
 
 // Draw tokens closer to the camera (lower in the picture) above the ones further away.

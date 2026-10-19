@@ -14,7 +14,8 @@ import {
   previewPerspective,
   setPerspectiveEditing,
   getSavedCamera,
-  reprojectTokens
+  reprojectTokens,
+  convertTokenPositions
 } from './perspective.js';
 
 export function createSceneIsometricTab(){
@@ -200,8 +201,14 @@ export function handleUpdateScene(scene, changes, options, userId) {
     // so redraw the canvas instead of patching the existing meshes.
     const wasPerspective = isPerspectiveActive();
     const previousCamera = getSavedCamera();
-    if (wasPerspective !== configurePerspective(scene)) {
-      canvas.draw();
+    const isPerspective = configurePerspective(scene);
+    if (wasPerspective !== isPerspective) {
+      // tokens keep their cells: floor positions outside of the perspective view, picture positions inside
+      const moved = (userId === game.user.id)
+        ? convertTokenPositions(scene, wasPerspective ? previousCamera : null, isPerspective ? getSavedCamera() : null)
+        : Promise.resolve();
+      moved.catch(error => console.error("Isometric Perspective | moving tokens for the new projection failed", error))
+        .finally(() => canvas.draw());
       return;
     }
 

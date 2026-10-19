@@ -2,7 +2,7 @@
   "title": "Isometric Perspective",
   "id": "isometric-perspective",
   "description": "Changes the canvas perspective from top-down to isometric, or to a vanishing point perspective (grid only, or grid and map). v13 and v14 brought by WarpSpeedNyanCat, forked from https://github.com/warpspeednyancatpatreon/isometric-perspective. Perspective projections by WesleySniperss.",
-  "version": "14.1.0",
+  "version": "14.1.1",
   "esmodules": [
     "scripts/main.js"
   ],

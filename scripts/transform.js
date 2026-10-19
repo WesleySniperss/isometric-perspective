@@ -8,7 +8,11 @@ import {
   isPerspectiveActive,
   applyPerspective,
   removePerspective,
-  applyPerspectiveToPlaceable
+  applyPerspectiveToPlaceable,
+  getStandingImage,
+  getStandingHeight,
+  useStandingImage,
+  recordIsometricPlacement
 } from './perspective.js';
 
 
@@ -105,6 +109,9 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
   let ElevationAdjustment = game.settings.get(isometricModuleConfig.MODULE_ID, "enableHeightAdjustment");
   if (!ElevationAdjustment) elevation = 0;
   if (object instanceof canvasToken) {
+    // Full-height standing art set in the token's Isometric tab
+    const standingTexture = getStandingImage(object);
+    useStandingImage(object, standingTexture);
     let sx = 1; // standard x
     let sy = 1; // standard y
     //We should only use the token art ratio if the ring is disabled
@@ -165,6 +172,17 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
       object.mesh.width = Math.abs(sx * scaleX * gridSize * isoScale * Math.sqrt(2))
       object.mesh.height = Math.abs(sy * scaleX * gridSize * isoScale * Math.sqrt(2) * ISOMETRIC_CONST.ratio)
     }
+    // Standing art: as tall as set in the token (in cells), keeping its proportions, feet on the cell
+    if (standingTexture) {
+      object.mesh.height = getStandingHeight(object) * gridSize * isoScale * Math.sqrt(2) * ISOMETRIC_CONST.ratio;
+      object.mesh.width = (object.mesh.height / ISOMETRIC_CONST.ratio) * (standingTexture.width / standingTexture.height);
+      object.mesh.anchor.set(0.5, 1);
+      object.mesh._isoStandingAnchor = true;
+    } else if (object.mesh._isoStandingAnchor) {
+      object.mesh.anchor.set(object.document.texture.anchorX, object.document.texture.anchorY);
+      delete object.mesh._isoStandingAnchor;
+    }
+
     // Elevation math
     offsetX += elevation * (1/gridDistance) * 100 * Math.sqrt(2) * (1/scaleX);
     offsetX *= gridSize / 100;   // grid ratio in comparison with default 100
@@ -181,6 +199,8 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
       object.document.x + (scaleX * gridSize/2) + (scaleX * isoOffsets.x),
       object.document.y + (scaleX * gridSize/2) + (scaleX * isoOffsets.y)
     );
+    // remembered so movement animations of other modules (Smooth Move) can't tilt or resize it
+    recordIsometricPlacement(object);
   }
 
   // If the object is a tile
