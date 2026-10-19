@@ -60,7 +60,30 @@ export let PROJECTION_TYPES = {
     reverseSkewY:     0,
     ratio:       1.428148006742114
   },
-  // Not an affine projection: the stage stays top-down, see perspective.js
+  // Not affine projections: the stage stays top-down, see perspective.js
+  'Perspective: Grid Only': {
+    rotation: 0,
+    skewX: 0,
+    skewY: 0,
+    HudAngle: 0,
+    reverseRotation: 0,
+    reverseSkewX: 0,
+    reverseSkewY: 0,
+    ratio: 1,
+    perspective: true
+  },
+  'Perspective: Grid and Map': {
+    rotation: 0,
+    skewX: 0,
+    skewY: 0,
+    HudAngle: 0,
+    reverseRotation: 0,
+    reverseSkewX: 0,
+    reverseSkewY: 0,
+    ratio: 1,
+    perspective: true
+  },
+  // Older scenes: replaced by the two modes above, hidden from the projection list
   'Perspective (Vanishing Point)': {
     rotation: 0,
     skewX: 0,

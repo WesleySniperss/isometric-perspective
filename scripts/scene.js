@@ -1,7 +1,21 @@
 import { applyIsometricPerspective, applyBackgroundTransformation } from './transform.js';
 import { isometricModuleConfig, updateIsometricConstants, parseCustomProjection, updateCustomProjection, PROJECTION_TYPES, DEFAULT_PROJECTION, CUSTOM_PROJECTION } from './consts.js';
 import { patchConfig, createAdjustableButton } from './utils.js';
-import { PERSPECTIVE_PROJECTION, PERSPECTIVE_DEFAULTS, configurePerspective, isPerspectiveActive, applyPerspective, previewPerspective } from './perspective.js';
+import {
+  PERSPECTIVE_LEGACY,
+  PERSPECTIVE_DEFAULTS,
+  isPerspectiveProjection,
+  currentPerspectiveMode,
+  readStandingTokens,
+  configurePerspective,
+  isPerspectiveActive,
+  isPerspectiveSaved,
+  applyPerspective,
+  previewPerspective,
+  setPerspectiveEditing,
+  getSavedCamera,
+  reprojectTokens
+} from './perspective.js';
 
 export function createSceneIsometricTab(){
   
@@ -19,10 +33,15 @@ export function createSceneIsometricTab(){
   const DefaultSceneConfig = Object.values(CONFIG.Scene.sheetClasses.base).find((d) => d.default)?.cls;
   const SceneConfig = DefaultSceneConfig?.prototype instanceof FoundrySceneConfig ? DefaultSceneConfig : FoundrySceneConfig;
 
-  const projectionTypes =  [...Object.keys(PROJECTION_TYPES)];
+  const projectionTypes = Object.keys(PROJECTION_TYPES).filter(type => type !== PERSPECTIVE_LEGACY);
   const currentProjection = SceneConfig.object?.getFlag(isometricModuleConfig.MODULE_ID, 'projectionType') ?? DEFAULT_PROJECTION;
   
   const extraSceneConfig = {
+    perspectiveStandingChoices: {
+      all: game.i18n.localize("isometric-perspective.scene_perspective_standing_all"),
+      players: game.i18n.localize("isometric-perspective.scene_perspective_standing_players"),
+      none: game.i18n.localize("isometric-perspective.scene_perspective_standing_none")
+    },
     projectionTypes: projectionTypes,
     document: currentProjection
   }
@@ -42,9 +61,15 @@ export function initSceneForm (app, html, context, options){
   const customProjectionInput = html.querySelector('input[name="flags.isometric-perspective.customProjection"]');
   const customProjectionContainer = html.querySelector('.custom-projection-container');
   
-  // perspective options are only shown for the vanishing point projection
+  // perspective options are only shown for the two perspective modes
   const perspectiveContainer = html.querySelector('.perspective-container');
-  const togglePerspectiveOptions = (projection) => perspectiveContainer?.classList.toggle('hidden', projection !== PERSPECTIVE_PROJECTION);
+  // scenes saved with the old single perspective projection open on the matching mode
+  const savedFlags = app.document.flags?.[isometricModuleConfig.MODULE_ID];
+  if (savedFlags?.projectionType === PERSPECTIVE_LEGACY) projectionSelect.value = currentPerspectiveMode(savedFlags);
+  const togglePerspectiveOptions = (projection) => {
+    perspectiveContainer?.classList.toggle('hidden', !isPerspectiveProjection(projection));
+    setPerspectiveEditing(isPerspectiveProjection(projection) && (app.document === canvas.scene));
+  };
   togglePerspectiveOptions(projectionSelect.value);
   if (perspectiveContainer) initPerspectiveFields(app, html, perspectiveContainer, projectionSelect);
 
@@ -66,11 +91,26 @@ function initPerspectiveFields(app, html, container, projectionSelect) {
   const field = (name) => html.querySelector(`[name="flags.isometric-perspective.${name}"]`);
 
   // range pickers need an explicit value
-  const sliders = {perspectiveTilt: 'tilt', perspectiveRotation: 'rotation', perspectiveFov: 'fov', perspectiveScale: 'scale'};
-  for (const [name, key] of Object.entries(sliders)) {
+  const defaults = {
+    perspectiveTilt: 'tilt',
+    perspectiveRotation: 'rotation',
+    perspectiveFov: 'fov',
+    perspectiveScale: 'scale',
+    perspectiveGridColor: 'gridColor',
+    perspectiveGridAlpha: 'gridAlpha',
+    perspectiveGridThickness: 'gridThickness'
+  };
+  for (const [name, key] of Object.entries(defaults)) {
     const input = field(name);
     if (input) input.value = scene.getFlag(isometricModuleConfig.MODULE_ID, name) ?? PERSPECTIVE_DEFAULTS[key];
   }
+
+  // scenes saved before the choice existed only had the "lay tokens flat" checkbox
+  const standing = field('perspectiveStandingTokens');
+  if (standing) standing.value = readStandingTokens(scene.flags?.[isometricModuleConfig.MODULE_ID]);
+
+  // the canvas can only preview once the projection is saved
+  container.querySelector('.perspective-save-notice')?.classList.toggle('hidden', isPerspectiveSaved(scene));
 
   // an empty grid size covers the whole map
   const dimensions = scene.dimensions;
@@ -96,8 +136,7 @@ function initPerspectiveFields(app, html, container, projectionSelect) {
   const readForm = () => ({
     isometricEnabled: field('isometricEnabled')?.checked,
     projectionType: projectionSelect.value,
-    perspectiveWarpMap: field('perspectiveWarpMap')?.checked,
-    perspectiveFlatTokens: field('perspectiveFlatTokens')?.checked,
+    perspectiveStandingTokens: field('perspectiveStandingTokens')?.value,
     perspectiveTilt: field('perspectiveTilt')?.value,
     perspectiveRotation: field('perspectiveRotation')?.value,
     perspectiveFov: field('perspectiveFov')?.value,
@@ -105,21 +144,27 @@ function initPerspectiveFields(app, html, container, projectionSelect) {
     perspectiveOffsetX: field('perspectiveOffsetX')?.value,
     perspectiveOffsetY: field('perspectiveOffsetY')?.value,
     perspectiveColumns: field('perspectiveColumns')?.value,
-    perspectiveRows: field('perspectiveRows')?.value
+    perspectiveRows: field('perspectiveRows')?.value,
+    perspectiveGridColor: field('perspectiveGridColor')?.value,
+    perspectiveGridAlpha: field('perspectiveGridAlpha')?.value,
+    perspectiveGridThickness: field('perspectiveGridThickness')?.value
   });
   const preview = () => previewPerspective(scene, readForm());
   container.addEventListener('input', preview);
   container.addEventListener('change', preview);
+  // switching between grid only and grid and map
+  projectionSelect.addEventListener('change', preview);
 }
 
 // closing the scene configuration without saving drops the preview
 export function handleCloseSceneConfig(app) {
   const scene = app.document;
-  if (!canvas.ready || (scene !== canvas.scene) || !isPerspectiveActive()) return;
-  applyPerspective(scene);
+  if (!canvas.ready || (scene !== canvas.scene)) return;
+  setPerspectiveEditing(false);
+  if (isPerspectiveActive()) applyPerspective(scene);
 }
 
-export function handleUpdateScene(scene, changes) {
+export function handleUpdateScene(scene, changes, options, userId) {
   if (scene.id !== canvas.scene?.id) return;
 
   if (
@@ -154,6 +199,7 @@ export function handleUpdateScene(scene, changes) {
     // Switching in or out of the perspective view changes how every mesh is built,
     // so redraw the canvas instead of patching the existing meshes.
     const wasPerspective = isPerspectiveActive();
+    const previousCamera = getSavedCamera();
     if (wasPerspective !== configurePerspective(scene)) {
       canvas.draw();
       return;
@@ -163,6 +209,8 @@ export function handleUpdateScene(scene, changes) {
       updateIsometricConstants(projectionType);
       applyIsometricPerspective(scene, isIsometric);
       applyBackgroundTransformation(scene, isIsometric, shouldTransformBackground);
+      // tokens stay on their cell when the camera changes (moved once, by whoever saved)
+      if (userId === game.user.id) reprojectTokens(previousCamera);
     });
   }
 }

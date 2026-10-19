@@ -71,7 +71,7 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
     return;
   }
 
-  // Perspective scenes: tokens stand upright and shrink with depth, tiles stay flat on the ground
+  // Perspective scenes: tokens stand upright and shrink with depth, tiles warp with the map when it is in perspective
   if (isPerspectiveActive()) {
     if (object instanceof canvasToken) removeTokenVisuals(object);
     applyPerspectiveToPlaceable(object);
