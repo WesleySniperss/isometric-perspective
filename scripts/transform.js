@@ -11,10 +11,14 @@ import {
   applyPerspectiveToPlaceable,
   isTokenStanding,
   getStandingImage,
-  getStandingHeight,
+  getStandingScale,
   useStandingImage,
   layoutStandingEffects,
   restoreEffects,
+  drawStandingShadow,
+  shadowCircle,
+  removeStandingShadow,
+  SHADOW_RADIUS,
   drawDashedLine,
   recordIsometricPlacement
 } from './perspective.js';
@@ -70,12 +74,14 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
   let isoTokenDisabled = object.document.getFlag(isometricModuleConfig.MODULE_ID, 'isoTokenDisabled') ?? 0;
   if (isoTileDisabled || isoTokenDisabled) {
     object.mesh.anchor.set(0.5, 0.5);  // This is set to make isometric anchor don't mess with non-iso scenes
+    if (object instanceof canvasToken) leaveIsometric(object);
     return
   }
 
   // Don't make transformation on the token or tile if the scene isn't isometric
   if (!isSceneIsometric) {
     object.mesh.anchor.set(0.5, 0.5);  // This is set to make isometric anchor don't mess with non-iso scenes
+    if (object instanceof canvasToken) leaveIsometric(object);
     return;
   }
 
@@ -182,10 +188,15 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
       object.mesh.width = Math.abs(sx * scaleX * gridSize * isoScale * Math.sqrt(2))
       object.mesh.height = Math.abs(sy * scaleX * gridSize * isoScale * Math.sqrt(2) * ISOMETRIC_CONST.ratio)
     }
-    // Standing art: as tall as set in the token (in cells), keeping its proportions, feet on the cell
+    // Standing art: as tall as set in the token (in cells, a cell being as long as its edge on screen), keeping its
+    // proportions, feet on the cell
+    let standingSize = null;
     if (standingTexture) {
-      object.mesh.height = getStandingHeight(object) * gridSize * isoScale * Math.sqrt(2) * ISOMETRIC_CONST.ratio;
-      object.mesh.width = (object.mesh.height / ISOMETRIC_CONST.ratio) * (standingTexture.width / standingTexture.height);
+      const scale = getStandingScale(object, standingTexture);
+      const upright = uprightArtScale();
+      standingSize = { width: Math.abs(scale.x) * standingTexture.width, height: Math.abs(scale.y) * standingTexture.height };
+      object.mesh.width = standingSize.width / upright.x;
+      object.mesh.height = standingSize.height / upright.y;
       object.mesh.anchor.set(0.5, 1);
       object.mesh._isoStandingAnchor = true;
     } else if (object.mesh._isoStandingAnchor) {
@@ -209,9 +220,12 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
       object.document.x + (scaleX * gridSize/2) + (scaleX * isoOffsets.x),
       object.document.y + (scaleX * gridSize/2) + (scaleX * isoOffsets.y)
     );
-    // Status effects in a column beside the standing art, upright like it
-    if (standingTexture) layoutIsometricEffects(object);
-    else restoreEffects(object);
+    // Status effects in a column beside the standing art, upright like it, and a shadow under its feet
+    if (standingSize) layoutIsometricEffects(object, standingSize);
+    else restoreEffects(object, inverseStage(), stagePoint(object.w / 2, object.h / 2));
+    const radius = SHADOW_RADIUS * Math.min(object.w, object.h);
+    object._isoShadowRadius = radius;
+    drawStandingShadow(object, shadowCircle(object.center.x, object.center.y, radius));
     // remembered so movement animations of other modules (Smooth Move) can't tilt or resize it
     recordIsometricPlacement(object);
   }
@@ -251,34 +265,80 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
 // A token lying flat on the isometric floor: Foundry's own drawing of it, rotated and skewed with the stage
 function layTokenFlat(token) {
   const mesh = token.mesh;
-  const { texture, rotation, lockRotation } = token.document;
+  const { texture, rotation, lockRotation, elevation } = token.document;
   useStandingImage(token, null);
-  removeTokenVisuals(token);
-  restoreEffects(token);
   token._refreshMeshSizeAndScale?.();
   mesh.anchor.set(texture.anchorX, texture.anchorY);
   mesh.angle = lockRotation ? 0 : rotation;
   mesh.skew.set(0, 0);
-  mesh.position.set(token.center.x, token.center.y);
   delete mesh._isoStandingAnchor;
-  delete mesh._isoPlacement;
+
+  // A flying token is lifted by its elevation like upright ones (Enable Height Adjustment), with its dashed line down
+  // to the floor and a shadow there
+  const heightAdjust = game.settings.get(isometricModuleConfig.MODULE_ID, "enableHeightAdjustment");
+  const height = heightAdjust ? Math.max(elevation ?? 0, 0) : 0;
+  const lift = cartesianToIso(height * (canvas.grid.size / canvas.grid.distance) * Math.SQRT2, 0);
+  mesh.position.set(token.center.x + lift.x, token.center.y + lift.y);
+  // its status icons stay upright, not skewed with the floor, and fly with it
+  const frame = inverseStage();
+  frame.tx = lift.x;
+  frame.ty = lift.y;
+  restoreEffects(token, frame, stagePoint(token.w / 2, token.h / 2));
+  if (height > 0) {
+    updateTokenVisuals(token, height, canvas.grid.size, canvas.grid.distance);
+    token._isoShadowRadius = SHADOW_RADIUS * Math.min(token.w, token.h);
+    drawStandingShadow(token, shadowCircle(token.center.x, token.center.y, token._isoShadowRadius));
+    recordIsometricPlacement(token);   // walk animations keep it in the air
+  } else {
+    removeTokenVisuals(token);
+    removeStandingShadow(token);
+    delete mesh._isoPlacement;
+  }
 }
 
-// The effects container of a standing token is turned upright like its art (see the size of the art above:
-// the stage shrinks it by √2 across and √2 · ratio down) and placed at its feet
-function layoutIsometricEffects(token) {
+// The token is no longer isometric: nothing of it stays upright
+function leaveIsometric(token) {
+  removeStandingShadow(token);
+  restoreEffects(token);
+}
+
+// The linear part of the isometric stage transform, without the zoom (as PIXI builds it from rotation and skew)
+function stageMatrix() {
+  const { rotation, skewX, skewY } = ISOMETRIC_CONST;
+  return { a: Math.cos(rotation + skewY), b: Math.sin(rotation + skewY), c: -Math.sin(rotation - skewX), d: Math.cos(rotation - skewX) };
+}
+
+// Undoes the stage: what is drawn in it is upright on screen, at the size of the scene
+function inverseStage() {
+  const { a, b, c, d } = stageMatrix();
+  const det = (a * d) - (b * c);
+  return new PIXI.Matrix(d / det, -b / det, -c / det, a / det, 0, 0);
+}
+
+// Where a point of the token is on screen (relative to its origin), in the coordinates of inverseStage
+function stagePoint(x, y) {
+  const { a, b, c, d } = stageMatrix();
+  return { x: (a * x) + (c * y), y: (b * x) + (d * y) };
+}
+
+// How much the stage stretches upright art (turned back by the reverse rotation) across and down
+function uprightArtScale() {
+  const { a, b, c, d } = stageMatrix();
+  const cos = Math.cos(ISOMETRIC_CONST.reverseRotation);
+  const sin = Math.sin(ISOMETRIC_CONST.reverseRotation);
+  return {
+    x: Math.hypot((a * cos) + (c * sin), (b * cos) + (d * sin)),
+    y: Math.hypot((c * cos) - (a * sin), (d * cos) - (b * sin))
+  };
+}
+
+// The effects container of a standing token is upright on screen, at its feet (`size`: the art on screen, unzoomed)
+function layoutIsometricEffects(token, size) {
   const mesh = token.mesh;
-  const width = Math.abs(mesh.width) / Math.SQRT2;
-  const height = Math.abs(mesh.height) / (Math.SQRT2 * ISOMETRIC_CONST.ratio);
-  layoutStandingEffects(token, -width / 2, width / 2, -height, height, {
-    x: mesh.position.x - token.position.x,
-    y: mesh.position.y - token.position.y,
-    rotation: ISOMETRIC_CONST.reverseRotation,
-    skewX: ISOMETRIC_CONST.reverseSkewX,
-    skewY: ISOMETRIC_CONST.reverseSkewY,
-    scaleX: Math.SQRT2,
-    scaleY: Math.SQRT2 * ISOMETRIC_CONST.ratio
-  });
+  const frame = inverseStage();
+  frame.tx = mesh.position.x - token.position.x;
+  frame.ty = mesh.position.y - token.position.y;
+  layoutStandingEffects(token, -size.width / 2, size.width / 2, -size.height, size.height, frame);
 }
 
 // Function to transform the scene background.
@@ -364,14 +424,7 @@ export function updateTokenVisuals(token, elevacao, gridSize, gridDistance) {
   const centerX = token.w ? token.w / 2 : token.h / 2;
   const centerY = token.h / 2;
 
-  // Criar uma sombra circular no chão
-  const shadow = new PIXI.Graphics();
-  shadow.beginFill(0x000000, 0.25);
-  shadow.drawCircle(0, 0, (canvas.grid.size * 0.3) * (token.h/canvas.grid.size));
-  shadow.endFill();
-  shadow.position.set(centerX, centerY);
-  container.addChild(shadow);
-
+  // The shadow on the floor is drawn for every standing token (drawStandingShadow)
   // A faint dashed line from the floor up to the token
   // Offset da elevação
   const offset = elevacao * (gridSize/gridDistance);

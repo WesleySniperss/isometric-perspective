@@ -47,6 +47,8 @@ const MIN_DEPTH = 0.15;        // nearest drawable depth, relative to the center
 const MAP_SUBDIVISIONS = 48;   // warped images are drawn as a mesh of this many quads per side
 const EDIT_COLOR = 0xFF9829;   // outline of the grid while the scene configuration is open
 const STEP_HOP = 0.5;          // standing art hops by this share of the walk bounce times its height (12% bounce: 6%)
+export const SHADOW_RADIUS = 0.36;   // of the shadow under standing tokens, per px of token size
+const SHADOW_ALPHA = 0.5;      // in its middle
 const NEIGHBOR_STEPS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 const NO_CAMERA = Object.freeze({ m: IDENTITY, inv: IDENTITY, column0: 0, row0: 0, columns: 1, rows: 1 });
 
@@ -69,6 +71,7 @@ let hiddenFoundryGrid = null;
 const tokenMatrix = new PIXI.Matrix();
 const meshMatrix = new PIXI.Matrix();
 const markerMatrix = new PIXI.Matrix();
+const effectsMatrix = new PIXI.Matrix();
 const cameraListeners = [];
 let cameraKey = "";
 let floorComputations = 0;   // > 0 while Foundry code runs on the floor (region shapes, see perspective-shapes.js)
@@ -709,6 +712,7 @@ export function installPerspectivePatches() {
   };
 
   Hooks.on("deleteTile", (document) => removeWarpedTile(document.id));
+  Hooks.on("destroyToken", removeStandingShadow);
 
   const module = game.modules.get(isometricModuleConfig.MODULE_ID);
   if (module) module.api = { ...(module.api ?? {}), perspective: perspectiveApi };
@@ -966,14 +970,7 @@ export function applyPerspectiveToPlaceable(object) {
   }
 
   const artScale = doc.getFlag(isometricModuleConfig.MODULE_ID, 'scale') ?? 1;
-  if (standingTexture) {
-    // As tall as set in the token (in cells), keeping the proportions of the image
-    const scale = getStandingHeight(object) * canvas.grid.size * artScale / standingTexture.height;
-    mesh._isoPerspectiveBase = {
-      x: scale * Math.sign(doc.texture.scaleX || 1),
-      y: scale * Math.sign(doc.texture.scaleY || 1)
-    };
-  }
+  if (standingTexture) mesh._isoPerspectiveBase = getStandingScale(object, standingTexture);
   else mesh._isoPerspectiveBase = { x: mesh.scale.x * artScale, y: mesh.scale.y * artScale };
   placeToken(object, displayPoint(object.center.x, object.center.y));
 }
@@ -981,16 +978,32 @@ export function applyPerspectiveToPlaceable(object) {
 // ----------------- Standing images -----------------
 
 export const STANDING_HEIGHT = 1.7;   // cells
+const PORTRAIT_WIDTH = 1.2;           // cells per cell of token width, at most, for actor portraits
 const standingTextures = new Map();   // src -> PIXI.Texture once loaded, a Promise while loading, null if it failed
 
-// Where the full-height art of a standing token comes from: its Standing Image, or else the actor portrait.
-// Without either (no actor, or the default portrait) the token keeps its own image.
+// Which art a standing token shows (its Standing Art, else the Standing Art setting of the module): its Standing
+// Image, the actor portrait, or its own token image. Returns the source and its kind, or null for the token image
+// (also when the chosen art is missing: no image set, no actor or the default portrait).
+export const STANDING_ART_CHOICES = ["image-portrait", "image-token", "portrait", "token"];
+export function getStandingArt(token) {
+  const MODULE_ID = isometricModuleConfig.MODULE_ID;
+  const doc = token.document;
+  const image = doc?.getFlag(MODULE_ID, "perspectiveStandingImage") || null;
+  const actorImage = token.actor?.img;
+  const portrait = (actorImage && ![CONST.DEFAULT_TOKEN, foundry.documents.BaseActor?.DEFAULT_ICON].includes(actorImage)) ? actorImage : null;
+  let art = doc?.getFlag(MODULE_ID, "perspectiveStandingArt");
+  if (!["image", "portrait", "token"].includes(art)) art = game.settings.get(MODULE_ID, "standingArt");
+  switch (art) {
+    case "token": return null;
+    case "portrait": return portrait ? { src: portrait, kind: "portrait" } : null;
+    case "image":
+    case "image-token": return image ? { src: image, kind: "image" } : null;
+    default: return image ? { src: image, kind: "image" } : (portrait ? { src: portrait, kind: "portrait" } : null);
+  }
+}
+
 export function getStandingSource(token) {
-  const image = token.document?.getFlag(isometricModuleConfig.MODULE_ID, "perspectiveStandingImage");
-  if (image) return image;
-  const portrait = token.actor?.img;
-  const defaults = [CONST.DEFAULT_TOKEN, foundry.documents.BaseActor?.DEFAULT_ICON];
-  return (portrait && !defaults.includes(portrait)) ? portrait : null;
+  return getStandingArt(token)?.src ?? null;
 }
 
 // The full-height art of a token for when it stands, once loaded
@@ -1012,9 +1025,22 @@ export function getStandingImage(token) {
   return null;
 }
 
-// Height of the standing art, in cells
-export function getStandingHeight(token) {
-  return Math.clamp(readNumber(token.document?.getFlag(isometricModuleConfig.MODULE_ID, "perspectiveStandingHeight"), STANDING_HEIGHT), 0.25, 4);
+// Size of the standing art, in canvas px per texture px before any projection. It is as tall as set in the token, in
+// cells, or else 1.7 cells for each cell of token size. The scale of the token (Appearance) and its Isometric Scale
+// apply. An actor portrait, without a height set, is kept about as wide as the token.
+export function getStandingScale(token, texture) {
+  const MODULE_ID = isometricModuleConfig.MODULE_ID;
+  const doc = token.document;
+  const size = canvas.grid.size;
+  const set = readNumber(doc.getFlag(MODULE_ID, "perspectiveStandingHeight"), null);
+  const cells = (set !== null) ? Math.clamp(set, 0.25, 4) : STANDING_HEIGHT * Math.max(doc.width, doc.height);
+  let scale = cells * size / texture.height;
+  if ((set === null) && (getStandingArt(token)?.kind === "portrait")) {
+    scale = Math.min(scale, PORTRAIT_WIDTH * doc.width * size / texture.width);
+  }
+  scale *= doc.getFlag(MODULE_ID, "scale") ?? 1;
+  const { scaleX = 1, scaleY = 1 } = doc.texture;
+  return { x: scale * scaleX, y: scale * scaleY };
 }
 
 // Put the standing art on the token mesh, or give the mesh its own texture back. Dynamic rings are left out
@@ -1053,7 +1079,8 @@ function placeToken(object, center, bounce = 1) {
   const offsetX = object.position.x - center.x;
   const offsetY = object.position.y - center.y;
 
-  // Flat: the token lies on the floor and follows the shape of its cell
+  // Flat: the token lies on the floor and follows the shape of its cell. A flying one is lifted by its elevation,
+  // like standing tokens, with its line down to the cell and a shadow there; its border stays on the cell.
   if (!isTokenStanding(object)) {
     const det = (J.xx * J.yy) - (J.xy * J.yx);
     if (!det) return;
@@ -1065,7 +1092,14 @@ function placeToken(object, center, bounce = 1) {
       center.x - ((J.xx * halfX) + (J.xy * halfY)),
       center.y - ((J.yx * halfX) + (J.yy * halfY)));
     object.transform.setFromMatrix(tokenMatrix);
-    object.hitArea = object.shape;
+
+    const s = stretch(J);
+    const lift = state.heightAdjust ? s * Math.max(doc.elevation ?? 0, 0) * canvas.grid.size / canvas.grid.distance : 0;
+    // The lift in token coordinates (the token is slanted like its cell): the lifted art can be clicked too
+    const liftX = (J.xy * lift) / det;
+    const liftY = (-J.xx * lift) / det;
+    const shape = object.shape;
+    object.hitArea = lift ? { contains: (x, y) => shape.contains(x, y) || shape.contains(x - liftX, y - liftY) } : shape;
 
     const angle = Math.toRadians(doc.lockRotation ? 0 : doc.rotation);
     const cos = Math.cos(angle);
@@ -1073,12 +1107,20 @@ function placeToken(object, center, bounce = 1) {
     meshMatrix.set(
       ((J.xx * cos) + (J.xy * sin)) * baseX, ((J.yx * cos) + (J.yy * sin)) * baseX,
       ((J.xy * cos) - (J.xx * sin)) * baseY, ((J.yy * cos) - (J.yx * sin)) * baseY,
-      center.x, center.y
+      center.x, center.y - lift
     );
     mesh.anchor.set(doc.texture.anchorX, doc.texture.anchorY);
     mesh.transform.setFromMatrix(meshMatrix);
-    removeElevationMarker(object);
-    restoreEffects(object);
+    drawElevationMarker(object, s, meshMatrix, { x: 0, y: lift }, lift);
+    const floor = (lift > 0) ? pictureToFloor(state.current, center.x, center.y) : null;
+    if (floor?.valid) {
+      const radius = SHADOW_RADIUS * Math.min(width, height);
+      drawStandingShadow(object, floorEllipse(state.current, floor, radius, radius).flatMap(p => [p.x, p.y]));
+    }
+    else removeStandingShadow(object);
+    // Status icons stay upright on the slanted token: the effects undo its transform, keeping the size of the floor
+    restoreEffects(object, effectsMatrix.set((s * J.yy) / det, (-s * J.yx) / det, (-s * J.xy) / det, (s * J.xx) / det, liftX, liftY),
+      { x: ((J.xx * halfX) + (J.xy * halfY)) / s, y: ((J.yx * halfX) + (J.yy * halfY)) / s });
     drawFootprint(object, center, (q) => ({
       x: object.pivot.x + (((J.yy * (q.x - object.position.x)) - (J.xy * (q.y - object.position.y))) / det),
       y: object.pivot.y + (((J.xx * (q.y - object.position.y)) - (J.yx * (q.x - object.position.x))) / det)
@@ -1105,7 +1147,7 @@ function placeToken(object, center, bounce = 1) {
   mesh.anchor.set(0.5, 1);
   meshMatrix.set(s * base.x, 0, 0, s * base.y, center.x + (s * right), center.y - (s * up));
   mesh.transform.setFromMatrix(meshMatrix);
-  drawElevationMarker(object, J, s, s * base.x, s * base.y, { x: -s * right, y: s * up }, s * lift);
+  drawElevationMarker(object, s, meshMatrix, { x: -s * right, y: s * up }, s * lift);
 
   // Let the standing art be clicked, not only its footprint (token-local, unscaled px)
   const artWidth = Math.abs(base.x) * mesh.texture.width;
@@ -1122,6 +1164,11 @@ function placeToken(object, center, bounce = 1) {
     x: object.pivot.x + ((q.x - object.position.x) / s),
     y: object.pivot.y + ((q.y - object.position.y) / s)
   }));
+  const floor = pictureToFloor(state.current, center.x, center.y);
+  if (floor.valid) {
+    const radius = SHADOW_RADIUS * Math.min(width, height);
+    drawStandingShadow(object, floorEllipse(state.current, floor, radius, radius).flatMap(p => [p.x, p.y]));
+  }
   recordPlacement(object, center);
 }
 
@@ -1142,11 +1189,89 @@ function drawFootprint(object, center, toLocal) {
     { alignment: 1, dashed: object.document.hidden });
 }
 
-// Tokens lifted by their elevation (Enable Height Adjustment): a faint shadow on their cell and a dashed line up to
-// their feet, so it is clear where on the floor a flying token is (Enable Token Visuals). Drawn with the token art,
-// so it is lit, hidden and sorted like it. `ground` is the cell center seen from the feet and `lift` the height of
-// the feet above it, in picture px; `s` is the size of the floor there.
-function drawElevationMarker(object, J, s, scaleX, scaleY, ground, lift) {
+// Points of an ellipse on the floor (center and radii in floor px), seen through a camera
+function floorEllipse(camera, center, rx, ry, count = 32) {
+  const points = [];
+  for (let i = 0; i < count; i++) {
+    const a = 2 * Math.PI * i / count;
+    points.push(floorToPicture(camera, center.x + (rx * Math.cos(a)), center.y + (ry * Math.sin(a))));
+  }
+  return points;
+}
+
+// A soft shadow on the floor under a standing token, so it is clear which cell it stands on. `points` is a polygon in
+// canvas coordinates ([x0, y0, x1, y1...]). It lies in the primary group right below the token art (see syncShadow).
+export function drawStandingShadow(token, points) {
+  let shadow = token._isoShadow;
+  if (!shadow || shadow.destroyed) {
+    shadow = token._isoShadow = new PIXI.Graphics();
+    shadow.name = "isometric-standing-shadow";
+    shadow.eventMode = "none";
+  }
+  if (shadow.parent !== canvas.primary) canvas.primary.addChild(shadow);
+  const count = points.length / 2;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < points.length; i += 2) {
+    cx += points[i] / count;
+    cy += points[i + 1] / count;
+  }
+  // Three rings, darker to the middle, for a soft edge
+  shadow.clear();
+  for (const k of [1, 0.72, 0.45]) {
+    shadow.beginFill(0x000000, SHADOW_ALPHA / 3);
+    shadow.drawPolygon(points.map((v, i) => (i % 2) ? cy + ((v - cy) * k) : cx + ((v - cx) * k)));
+    shadow.endFill();
+  }
+  syncShadow(token);
+}
+
+// A circle on the floor of an isometric scene (stage coordinates), for drawStandingShadow
+export function shadowCircle(x, y, radius, count = 32) {
+  const points = [];
+  for (let i = 0; i < count; i++) {
+    const a = 2 * Math.PI * i / count;
+    points.push(x + (radius * Math.cos(a)), y + (radius * Math.sin(a)));
+  }
+  return points;
+}
+
+export function removeStandingShadow(token) {
+  const shadow = token._isoShadow;
+  if (!shadow) return;
+  if (!shadow.destroyed) shadow.destroy();
+  delete token._isoShadow;
+}
+
+// The shadow is shown and faded like the token art. It is sorted right below the tokens of its elevation, in a layer
+// of its own (the token layer of the primary group only holds token meshes, depth sorting relies on that).
+function syncShadow(token) {
+  const shadow = token._isoShadow;
+  const mesh = token.mesh;
+  if (!shadow || shadow.destroyed) return;
+  if (!mesh || mesh.destroyed) {
+    shadow.visible = false;
+    return;
+  }
+  shadow.visible = mesh.visible;
+  shadow.alpha = mesh.alpha;
+  // On the floor of its level, also under a token that flies
+  const bottom = canvas.scene?.levels?.get(token.document.level)?.elevation?.bottom;
+  const elevation = Math.min(mesh.elevation, Number.isFinite(bottom) ? bottom : 0);
+  const sortLayer = mesh.sortLayer - 0.5;
+  if ((shadow.elevation !== elevation) || (shadow.sortLayer !== sortLayer) || (shadow.sort !== mesh.sort)) {
+    shadow.elevation = elevation;
+    shadow.sortLayer = sortLayer;
+    shadow.sort = mesh.sort;
+    if (shadow.parent) shadow.parent.sortDirty = true;
+  }
+}
+
+// Tokens lifted by their elevation (Enable Height Adjustment): a dashed line from their cell (and its shadow) up to
+// their art, so it is clear where on the floor a flying token is (Enable Token Visuals). Drawn with the token art,
+// so it is lit, hidden and sorted like it. `art` is the matrix of the art, `ground` the cell center seen from where
+// the art is placed and `lift` its height above the cell, in picture px; `s` is the size of the floor there.
+function drawElevationMarker(object, s, art, ground, lift) {
   const mesh = object.mesh;
   if (!(lift > 0) || !game.settings.get(isometricModuleConfig.MODULE_ID, "enableTokenVisuals")) {
     removeElevationMarker(object);
@@ -1158,20 +1283,11 @@ function drawElevationMarker(object, J, s, scaleX, scaleY, ground, lift) {
     marker.name = "isometric-elevation-marker";
     marker.eventMode = "none";
   }
-  // Undo the scale of the art, to draw in picture px
-  marker.transform.setFromMatrix(markerMatrix.set(1 / scaleX, 0, 0, 1 / scaleY, 0, 0));
+  // Undo the transform of the art, to draw in picture px
+  const det = (art.a * art.d) - (art.b * art.c);
+  if (!det) return;
+  marker.transform.setFromMatrix(markerMatrix.set(art.d / det, -art.b / det, -art.c / det, art.a / det, 0, 0));
   marker.clear();
-
-  // The shadow lies on the floor: a circle on the cell, seen through the camera
-  const radius = 0.3 * canvas.grid.size * Math.min(object.document.width, object.document.height);
-  const shadow = [];
-  for (let i = 0; i < 32; i++) {
-    const a = 2 * Math.PI * i / 32;
-    const dx = radius * Math.cos(a);
-    const dy = radius * Math.sin(a);
-    shadow.push(ground.x + (J.xx * dx) + (J.xy * dy), ground.y + (J.yx * dx) + (J.yy * dy));
-  }
-  marker.beginFill(0x000000, 0.25).drawPolygon(shadow).endFill();
 
   const top = { x: ground.x, y: ground.y - lift };
   const size = canvas.grid.size * s;
@@ -1204,7 +1320,7 @@ export function drawDashedLine(graphics, from, to, { width, dash, gap, color, al
 
 // Status effects of a standing token: a column beside the art, from its top down (token-local, unscaled px).
 // Same icon size and background as Foundry, which lays them out over the footprint instead.
-// `frame` places the effects container (isometric scenes turn it upright), otherwise it sits on the token.
+// `frame` places the effects container (a matrix; isometric scenes turn it upright), otherwise it sits on the token.
 export function layoutStandingEffects(object, artLeft, artRight, artTop, artHeight, frame = null) {
   const effects = object.effects;
   if (!effects || effects.destroyed) return;
@@ -1231,19 +1347,28 @@ export function layoutStandingEffects(object, artLeft, artRight, artTop, artHeig
   effects._isoPerspectiveColumn = true;
 }
 
-function setEffectsFrame(effects, frame) {
-  effects.position.set(frame?.x ?? 0, frame?.y ?? 0);
-  effects.rotation = frame?.rotation ?? 0;
-  effects.skew.set(frame?.skewX ?? 0, frame?.skewY ?? 0);
-  effects.scale.set(frame?.scaleX ?? 1, frame?.scaleY ?? 1);
+// The transform of the effects container (a PIXI.Matrix in token coordinates), or none
+function setEffectsFrame(effects, matrix) {
+  if (matrix) effects.transform.setFromMatrix(matrix);
+  else {
+    effects.position.set(0, 0);
+    effects.rotation = 0;
+    effects.skew.set(0, 0);
+    effects.scale.set(1, 1);
+  }
+  effects._isoFramed = !!matrix;
 }
 
-// Give a token that lies flat (again) Foundry's own status layout
-export function restoreEffects(object) {
-  if (!object.effects?._isoPerspectiveColumn) return;
-  object.effects._isoPerspectiveColumn = false;
-  setEffectsFrame(object.effects, null);
-  object._refreshEffects?.();
+// Foundry's own status layout, for tokens that lie flat. `frame` keeps the icons upright on a slanted token (it undoes
+// the transform of the token), `overlay` is then where the big overlay icon goes (effects coordinates).
+export function restoreEffects(object, frame = null, overlay = null) {
+  const effects = object.effects;
+  if (!effects || effects.destroyed) return;
+  const relayout = effects._isoPerspectiveColumn || (effects._isoFramed && !frame);
+  effects._isoPerspectiveColumn = false;
+  setEffectsFrame(effects, frame);
+  if (relayout) object._refreshEffects?.();
+  if (frame && overlay && effects.overlay) effects.overlay.position.set(overlay.x, overlay.y);
 }
 
 // Remember exactly what was set, to notice when something else changes it
@@ -1276,6 +1401,7 @@ function guardTokens() {
     if (!mesh || mesh.destroyed || token.destroyed) continue;
     if (state.active) guardPerspectiveToken(token);
     else if (mesh._isoPlacement) guardIsometricToken(token);
+    if (token._isoShadow) syncShadow(token);
   }
 }
 
@@ -1362,6 +1488,10 @@ function guardIsometricToken(token) {
   } else {
     mesh.scale.set(p.scaleX * bounce, p.scaleY * bounce);
     mesh.position.set(center.x + p.offsetX, center.y + p.offsetY);
+  }
+  // The shadow walks along on the floor
+  if (moved && token._isoShadow && token._isoShadowRadius) {
+    drawStandingShadow(token, shadowCircle(center.x, center.y, token._isoShadowRadius));
   }
   Object.assign(p, { x: mesh.position.x, y: mesh.position.y, cx: center.x, cy: center.y, appliedX: mesh.scale.x, appliedY: mesh.scale.y });
 }

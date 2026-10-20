@@ -107,7 +107,7 @@ Hooks.once("init", function () {
       hint: game.i18n.localize("isometric-perspective.settings_height_hint"), //hint: 'Toggle whether token sprites adjust their position to reflect their elevation',
       scope: "client",
       config: true,
-      default: false,
+      default: true,
       type: Boolean,
       requiresReload: true,
     },
@@ -124,6 +124,29 @@ Hooks.once("init", function () {
       default: true,
       type: Boolean,
       requiresReload: true,
+    },
+  );
+
+  // Which art standing tokens show, unless a token chooses its own (Standing Art in its Isometric tab)
+  game.settings.register(
+    isometricModuleConfig.MODULE_ID,
+    "standingArt",
+    {
+      name: game.i18n.localize("isometric-perspective.settings_standing_art_name"),
+      hint: game.i18n.localize("isometric-perspective.settings_standing_art_hint"),
+      scope: "world",
+      config: true,
+      default: "image-portrait",
+      type: String,
+      choices: {
+        "image-portrait": game.i18n.localize("isometric-perspective.standing_art_image_portrait"),
+        "image-token": game.i18n.localize("isometric-perspective.standing_art_image_token"),
+        "portrait": game.i18n.localize("isometric-perspective.standing_art_portrait"),
+        "token": game.i18n.localize("isometric-perspective.standing_art_token")
+      },
+      onChange: () => {
+        for (const token of canvas.tokens?.placeables ?? []) token.renderFlags.set({ refreshMesh: true, refreshSize: true });
+      }
     },
   );
 

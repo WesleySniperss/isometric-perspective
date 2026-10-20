@@ -18,6 +18,18 @@
         </div>
     </div>
     <p class="hint">{{localize 'isometric-perspective.token_perspectivePose_hint'}}</p>
+    <div class="form-group">
+        <label for="{{rootId}}-isometric-perspective-standing-art">{{localize 'isometric-perspective.token_standingArt_name'}}</label>
+        <div class="form-fields">
+            <select id="{{rootId}}-isometric-perspective-standing-art" name="flags.isometric-perspective.perspectiveStandingArt">
+                <option value="default">{{localize 'isometric-perspective.token_standingArt_default'}}</option>
+                <option value="image" {{#if (eq document.flags.isometric-perspective.perspectiveStandingArt "image")}}selected{{/if}}>{{localize 'isometric-perspective.token_standingArt_image'}}</option>
+                <option value="portrait" {{#if (eq document.flags.isometric-perspective.perspectiveStandingArt "portrait")}}selected{{/if}}>{{localize 'isometric-perspective.standing_art_portrait'}}</option>
+                <option value="token" {{#if (eq document.flags.isometric-perspective.perspectiveStandingArt "token")}}selected{{/if}}>{{localize 'isometric-perspective.standing_art_token'}}</option>
+            </select>
+        </div>
+    </div>
+    <p class="hint">{{localize 'isometric-perspective.token_standingArt_hint'}}</p>
 
     <div class="form-group">
         <label>{{localize 'isometric-perspective.token_standingImage_name'}}</label>
@@ -28,7 +40,7 @@
     <div class="form-group">
         <label>{{localize 'isometric-perspective.token_standingHeight_name'}}</label>
         <div class="form-fields">
-            <range-picker name="flags.isometric-perspective.perspectiveStandingHeight" value="{{document.flags.isometric-perspective.perspectiveStandingHeight}}" min="0.5" max="4" step="0.1"></range-picker>
+            <input type="number" name="flags.isometric-perspective.perspectiveStandingHeight" value="{{document.flags.isometric-perspective.perspectiveStandingHeight}}" min="0.25" max="4" step="0.1">
         </div>
     </div>
     <p class="hint">{{localize 'isometric-perspective.token_standingImage_hint'}}</p>

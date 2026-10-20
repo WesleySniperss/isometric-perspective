@@ -63,9 +63,9 @@ export function initTokenForm (app, html, context, options) {
   inputOffsetY.value = currentOffsetY ?? 0;
   inputScale.value = currentScale ?? 1;
 
-  // full-height standing art is 1.7 cells tall unless set
-  const inputStandingHeight = html.querySelector('range-picker[name="flags.isometric-perspective.perspectiveStandingHeight"]');
-  if (inputStandingHeight) inputStandingHeight.value = tokenDoc.getFlag(isometricModuleConfig.MODULE_ID, 'perspectiveStandingHeight') ?? STANDING_HEIGHT;
+  // full-height standing art is 1.7 cells tall for each cell of token size, unless set: an empty field shows that
+  const inputStandingHeight = html.querySelector('input[name="flags.isometric-perspective.perspectiveStandingHeight"]');
+  if (inputStandingHeight) inputStandingHeight.placeholder = +(STANDING_HEIGHT * Math.max(tokenDoc.width ?? 1, tokenDoc.height ?? 1)).toFixed(2);
 
   const resetAlignementButton = html.querySelector('.toggle-alignment-lines');
   resetAlignementButton.addEventListener("click", async (event) => {

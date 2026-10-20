@@ -137,8 +137,8 @@ export function sortPlaceableByPosition() {
   const canvasLayer = canvas.primary.children;
 
   const filteredLayer = canvasLayer.filter((sprite) => {
-    return sprite.sortLayer === placeableMeshLayer;
-  }); // only need DepthSortPlaceables
+    return (sprite.sortLayer === placeableMeshLayer) && sprite.object?.document;
+  }); // only need DepthSortPlaceables (not what other modules draw in that layer)
   let layerToSort = filteredLayer.map((item) => Object.assign({}, item));
 
   layerToSort.sort((sprite, sibling) => {
