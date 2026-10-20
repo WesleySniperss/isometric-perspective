@@ -9,9 +9,13 @@ import {
   applyPerspective,
   removePerspective,
   applyPerspectiveToPlaceable,
+  isTokenStanding,
   getStandingImage,
   getStandingHeight,
   useStandingImage,
+  layoutStandingEffects,
+  restoreEffects,
+  drawDashedLine,
   recordIsometricPlacement
 } from './perspective.js';
 
@@ -82,6 +86,12 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
     return;
   }
 
+  // Tokens lying flat (their pose, or the Standing Tokens of the scene) keep Foundry's drawing, on the isometric floor
+  if ((object instanceof canvasToken) && !isTokenStanding(object)) {
+    layTokenFlat(object);
+    return;
+  }
+
   // It undoes rotation and deformation
   object.mesh.rotation = ISOMETRIC_CONST.reverseRotation;
   object.mesh.skew.set(ISOMETRIC_CONST.reverseSkewX, ISOMETRIC_CONST.reverseSkewY);
@@ -109,7 +119,7 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
   let ElevationAdjustment = game.settings.get(isometricModuleConfig.MODULE_ID, "enableHeightAdjustment");
   if (!ElevationAdjustment) elevation = 0;
   if (object instanceof canvasToken) {
-    // Full-height standing art set in the token's Isometric tab
+    // Standing art: the Standing Image of the token, or else the actor portrait
     const standingTexture = getStandingImage(object);
     useStandingImage(object, standingTexture);
     let sx = 1; // standard x
@@ -199,6 +209,9 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
       object.document.x + (scaleX * gridSize/2) + (scaleX * isoOffsets.x),
       object.document.y + (scaleX * gridSize/2) + (scaleX * isoOffsets.y)
     );
+    // Status effects in a column beside the standing art, upright like it
+    if (standingTexture) layoutIsometricEffects(object);
+    else restoreEffects(object);
     // remembered so movement animations of other modules (Smooth Move) can't tilt or resize it
     recordIsometricPlacement(object);
   }
@@ -233,6 +246,39 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
     object.mesh.anchor.set(geometry.anchor.x, geometry.anchor.y);
     object.mesh.position.set(geometry.anchorPoint.x + isoOffsets.x,geometry.anchorPoint.y + isoOffsets.y);
   }
+}
+
+// A token lying flat on the isometric floor: Foundry's own drawing of it, rotated and skewed with the stage
+function layTokenFlat(token) {
+  const mesh = token.mesh;
+  const { texture, rotation, lockRotation } = token.document;
+  useStandingImage(token, null);
+  removeTokenVisuals(token);
+  restoreEffects(token);
+  token._refreshMeshSizeAndScale?.();
+  mesh.anchor.set(texture.anchorX, texture.anchorY);
+  mesh.angle = lockRotation ? 0 : rotation;
+  mesh.skew.set(0, 0);
+  mesh.position.set(token.center.x, token.center.y);
+  delete mesh._isoStandingAnchor;
+  delete mesh._isoPlacement;
+}
+
+// The effects container of a standing token is turned upright like its art (see the size of the art above:
+// the stage shrinks it by √2 across and √2 · ratio down) and placed at its feet
+function layoutIsometricEffects(token) {
+  const mesh = token.mesh;
+  const width = Math.abs(mesh.width) / Math.SQRT2;
+  const height = Math.abs(mesh.height) / (Math.SQRT2 * ISOMETRIC_CONST.ratio);
+  layoutStandingEffects(token, -width / 2, width / 2, -height, height, {
+    x: mesh.position.x - token.position.x,
+    y: mesh.position.y - token.position.y,
+    rotation: ISOMETRIC_CONST.reverseRotation,
+    skewX: ISOMETRIC_CONST.reverseSkewX,
+    skewY: ISOMETRIC_CONST.reverseSkewY,
+    scaleX: Math.SQRT2,
+    scaleY: Math.SQRT2 * ISOMETRIC_CONST.ratio
+  });
 }
 
 // Function to transform the scene background.
@@ -320,23 +366,22 @@ export function updateTokenVisuals(token, elevacao, gridSize, gridDistance) {
 
   // Criar uma sombra circular no chão
   const shadow = new PIXI.Graphics();
-  shadow.beginFill(0x000000, 0.3);
-  shadow.drawCircle(0, 0, (canvas.grid.size/2) * (token.h/canvas.grid.size));
+  shadow.beginFill(0x000000, 0.25);
+  shadow.drawCircle(0, 0, (canvas.grid.size * 0.3) * (token.h/canvas.grid.size));
   shadow.endFill();
   shadow.position.set(centerX, centerY);
   container.addChild(shadow);
 
-  // Criar uma linha conectando o chão ao token
+  // A faint dashed line from the floor up to the token
   // Offset da elevação
   const offset = elevacao * (gridSize/gridDistance);
 
   const line = new PIXI.Graphics();
-  line.lineStyle(2, 0xff0000, 0.5);
-  line.moveTo(centerX, centerY)
-      .lineTo(
-        centerX + offset,
-        centerY - offset
-      );
+  const from = { x: centerX, y: centerY };
+  const to = { x: centerX + offset, y: centerY - offset };
+  const dash = { dash: gridSize * 0.1, gap: gridSize * 0.07 };
+  drawDashedLine(line, from, to, { ...dash, width: Math.max(gridSize * 0.03, 1) + 2, color: 0x000000, alpha: 0.3 });
+  drawDashedLine(line, from, to, { ...dash, width: Math.max(gridSize * 0.03, 1), color: 0xFFFFFF, alpha: 0.65 });
   container.addChild(line);
 
   // Adicionar o container ao TOKEN, não ao stage.

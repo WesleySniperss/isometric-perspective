@@ -53,8 +53,20 @@
         <p class="hint">{{localize 'isometric-perspective.custom_projection_hint'}}  <a href='https://github.com/arlosmolten/isometric-perspective/wiki/2.-Advanced-Features#2-custom-isometric-projection'>Manual</a> &  <a href='https://arlosmolten.github.io/isometric-perspective/'>Website</a></p>
     </div>
 
+    <!-- Which tokens stand upright, in every projection -->
+    <div class="form-group">
+        <label for="{{rootId}}-isometric-perspective-perspective-standing">{{localize 'isometric-perspective.scene_perspective_standing_name'}}</label>
+        <div class="form-fields">
+            <select id="{{rootId}}-isometric-perspective-perspective-standing" name="flags.isometric-perspective.perspectiveStandingTokens">
+                {{selectOptions perspectiveStandingChoices selected=perspectiveStandingTokens}}
+            </select>
+        </div>
+        <p class="hint">{{localize 'isometric-perspective.scene_perspective_standing_hint'}}</p>
+    </div>
+
     <!-- Vanishing Point Perspective -->
     <div class="perspective-container hidden">
+        <hr>
         <p class="hint">{{localize 'isometric-perspective.scene_perspective_intro'}}</p>
         <p class="notification warning perspective-save-notice hidden"><i class="fa-solid fa-floppy-disk"></i> {{localize 'isometric-perspective.scene_perspective_save_notice'}}</p>
 
@@ -133,16 +145,6 @@
             </div>
             <p class="hint">{{localize 'isometric-perspective.scene_perspective_grid_style_hint'}}</p>
         </div>
-
-        <div class="form-group">
-            <label for="{{rootId}}-isometric-perspective-perspective-standing">{{localize 'isometric-perspective.scene_perspective_standing_name'}}</label>
-            <div class="form-fields">
-                <select id="{{rootId}}-isometric-perspective-perspective-standing" name="flags.isometric-perspective.perspectiveStandingTokens">
-                    {{selectOptions perspectiveStandingChoices selected=perspectiveStandingTokens}}
-                </select>
-            </div>
-        </div>
-        <p class="hint">{{localize 'isometric-perspective.scene_perspective_standing_hint'}}</p>
     </div>
   </div>
 </section>

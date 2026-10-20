@@ -1,5 +1,6 @@
 import { isometricModuleConfig, ISOMETRIC_CONST } from './consts.js';
 import { applyIsometricTransformation, updateTokenVisuals } from './transform.js';
+import { STANDING_HEIGHT } from './perspective.js';
 import {
   cartesianToIso, 
   adjustInputWithMouseDrag,
@@ -62,9 +63,9 @@ export function initTokenForm (app, html, context, options) {
   inputOffsetY.value = currentOffsetY ?? 0;
   inputScale.value = currentScale ?? 1;
 
-  // full-height standing art is 1.5 cells tall unless set
+  // full-height standing art is 1.7 cells tall unless set
   const inputStandingHeight = html.querySelector('range-picker[name="flags.isometric-perspective.perspectiveStandingHeight"]');
-  if (inputStandingHeight) inputStandingHeight.value = tokenDoc.getFlag(isometricModuleConfig.MODULE_ID, 'perspectiveStandingHeight') ?? 1.5;
+  if (inputStandingHeight) inputStandingHeight.value = tokenDoc.getFlag(isometricModuleConfig.MODULE_ID, 'perspectiveStandingHeight') ?? STANDING_HEIGHT;
 
   const resetAlignementButton = html.querySelector('.toggle-alignment-lines');
   resetAlignementButton.addEventListener("click", async (event) => {

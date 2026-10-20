@@ -46,6 +46,7 @@ const IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 const MIN_DEPTH = 0.15;        // nearest drawable depth, relative to the center of the grid
 const MAP_SUBDIVISIONS = 48;   // warped images are drawn as a mesh of this many quads per side
 const EDIT_COLOR = 0xFF9829;   // outline of the grid while the scene configuration is open
+const STEP_HOP = 0.5;          // standing art hops by this share of the walk bounce times its height (12% bounce: 6%)
 const NEIGHBOR_STEPS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 const NO_CAMERA = Object.freeze({ m: IDENTITY, inv: IDENTITY, column0: 0, row0: 0, columns: 1, rows: 1 });
 
@@ -67,9 +68,19 @@ const warpedTiles = new Map();
 let hiddenFoundryGrid = null;
 const tokenMatrix = new PIXI.Matrix();
 const meshMatrix = new PIXI.Matrix();
+const markerMatrix = new PIXI.Matrix();
+const cameraListeners = [];
+let cameraKey = "";
+let floorComputations = 0;   // > 0 while Foundry code runs on the floor (region shapes, see perspective-shapes.js)
+const sceneCameras = new Map();   // scene id -> { key, camera }, for scenes that are not on the canvas
 
 export function isPerspectiveActive() {
   return state.active;
+}
+
+// "Grid and Map": the map, tiles and tokens follow the camera
+export function isPerspectiveMapWarped() {
+  return state.active && state.warpMap;
 }
 
 // A token can choose its own pose (token or prototype token configuration), otherwise the scene decides
@@ -109,12 +120,68 @@ export function configurePerspective(scene, overrides = {}) {
   state.standingTokens = readStandingTokens(flags);
   state.heightAdjust = game.settings.get(MODULE_ID, "enableHeightAdjustment");
   state.style = readStyle(flags);
-  if (!state.active || !scene?.dimensions) return state.active;
-
-  state.current = buildCamera(scene, flags);
-  state.previewing = isPerspectiveFlags(savedFlags) && (Object.keys(overrides).length > 0);
-  state.saved = state.previewing ? buildCamera(scene, savedFlags) : state.current;
+  if (state.active && scene?.dimensions) {
+    state.current = buildCamera(scene, flags);
+    state.previewing = isPerspectiveFlags(savedFlags) && (Object.keys(overrides).length > 0);
+    state.saved = state.previewing ? buildCamera(scene, savedFlags) : state.current;
+  }
+  notifyCameraChange(scene);
   return state.active;
+}
+
+// Things placed on the floor (region shapes...) are computed with the saved camera: tell when it changed
+export function onPerspectiveCameraChange(listener) {
+  cameraListeners.push(listener);
+}
+
+function notifyCameraChange(scene) {
+  const camera = (state.active && scene?.dimensions) ? state.saved.m.map(value => value.toPrecision(12)).join(",") : "none";
+  const key = `${scene?.id}|${camera}`;
+  if (key === cameraKey) return;
+  cameraKey = key;
+  for (const listener of cameraListeners) {
+    try {
+      listener(scene);
+    } catch (error) {
+      console.error("Isometric Perspective | perspective camera listener failed", error);
+    }
+  }
+}
+
+// Foundry code that is run on the floor (shapes computed in floor coordinates) measures and snaps on the floor itself
+export function computeOnFloor(callback) {
+  floorComputations++;
+  try {
+    return callback();
+  } finally {
+    floorComputations--;
+  }
+}
+
+export function isComputingOnFloor() {
+  return floorComputations > 0;
+}
+
+// The saved camera of a scene in perspective, or null. Also for scenes that are not on the canvas: region shapes of
+// any scene lie on its floor, for whichever client computes them.
+export function getSceneCamera(scene) {
+  if (!scene) return null;
+  if (scene === canvas.scene) return state.active ? state.saved : null;
+  const flags = scene.flags?.[isometricModuleConfig.MODULE_ID] ?? {};
+  if (!isPerspectiveFlags(flags) || !scene.dimensions) return null;
+  const key = JSON.stringify([flags, scene.dimensions.sceneRect, scene.dimensions.size]);
+  let entry = sceneCameras.get(scene.id);
+  if (entry?.key !== key) sceneCameras.set(scene.id, entry = { key, camera: buildCamera(scene, flags) });
+  return entry.camera;
+}
+
+// The floor point (scene px on the floor) under a picture point, and the picture point of a floor point
+export function perspectiveFloorPoint(x, y, camera = state.saved) {
+  return pictureToFloor(camera, x, y);
+}
+
+export function perspectivePicturePoint(x, y, camera = state.saved) {
+  return floorToPicture(camera, x, y);
 }
 
 // Turn the perspective view on (or update it) for the current scene.
@@ -150,6 +217,7 @@ export function removePerspective() {
   state.active = false;
   state.previewing = false;
   clearPerspectiveObjects();
+  notifyCameraChange(canvas.scene);
 }
 
 // Destroy everything drawn for the perspective view (also used when the canvas is torn down).
@@ -169,7 +237,7 @@ export function getSavedCamera() {
 // Keep every token on its floor cell after the saved camera changed (run by the user who saved).
 export async function reprojectTokens(previous) {
   const scene = canvas.scene;
-  if (!state.active || !previous || !scene || (previous === state.saved)) return;
+  if (!state.active || !state.warpMap || !previous || !scene || (previous === state.saved)) return;
   if (previous.m.every((value, i) => Math.abs(value - state.saved.m[i]) < 1e-12)) return;
 
   const size = canvas.grid.size;
@@ -189,8 +257,9 @@ export async function reprojectTokens(previous) {
   if (updates.length) await scene.updateEmbeddedDocuments("Token", updates, { animate: false });
 }
 
-// Tokens keep their cells when a scene enters or leaves the perspective view: outside of it token positions
-// are floor (top-down) positions, inside they are picture positions. Run by the user who changed the scene.
+// Tokens keep their cells when a scene enters or leaves "Grid and Map": outside of it token positions are floor
+// (top-down) positions, inside they are picture positions. "Grid Only" leaves them on the picture, where they
+// stand on the painted map. Run by the user who changed the scene.
 export async function convertTokenPositions(scene, fromCamera, toCamera) {
   if (!scene?.dimensions || (!fromCamera && !toCamera)) return;
   const size = scene.dimensions.size;
@@ -426,7 +495,7 @@ function jacobianAtPicture(camera, x, y) {
 
 // Where a point placed with the saved camera is drawn by the current one (the same point unless previewing)
 function displayPoint(x, y) {
-  if (!state.previewing) return { x, y };
+  if (!state.previewing || !state.warpMap) return { x, y };
   const floor = pictureToFloor(state.saved, x, y);
   if (!floor.valid) return { x, y };
   const p = floorToPicture(state.current, floor.x, floor.y);
@@ -505,9 +574,28 @@ function shiftTokenPosition(token, dx, dy) {
 }
 
 // Measurement waypoint moved onto the floor. Token waypoints are top-left corners plus the grid anchor.
+// Distances are measured on the floor, but terrain (regions with movement costs) is where it is drawn on the
+// picture: the grid offsets handed to cost functions are moved back onto the picture.
+function toPictureOffset(grid, offset) {
+  if (!offset || (offset.i === undefined)) return offset;
+  const size = grid.size;
+  const point = grid.isGridless
+    ? floorToPicture(state.saved, offset.j, offset.i)
+    : floorToPicture(state.saved, (offset.j + 0.5) * size, (offset.i + 0.5) * size);
+  if (!point.valid) return offset;
+  const picture = grid.getOffset({ x: point.x, y: point.y });
+  return (offset.k !== undefined) ? { i: picture.i, j: picture.j, k: offset.k } : { i: picture.i, j: picture.j };
+}
+
+function onPictureCost(grid, cost) {
+  if (typeof cost !== "function") return cost;
+  return (from, to, distance, segment) => cost(toPictureOffset(grid, from), toPictureOffset(grid, to), distance, segment);
+}
+
 function toFloorWaypoint(grid, waypoint) {
   const camera = state.saved;
   const size = grid.size;
+  if (typeof waypoint.cost === "function") waypoint = { ...waypoint, cost: onPictureCost(grid, waypoint.cost) };
   if ((waypoint.width === undefined) || (waypoint.height === undefined)) {
     const floor = pictureToFloor(camera, waypoint.x, waypoint.y);
     return floor.valid ? { ...waypoint, x: floor.x, y: floor.y } : waypoint;
@@ -527,13 +615,60 @@ function toFloorWaypoint(grid, waypoint) {
   return { ...waypoint, x: floor.x - halfX + anchorX, y: floor.y - halfY + anchorY };
 }
 
+// The perspective cells a token covers along a movement path, as picture polygons (and their centers), for the ruler
+// to highlight. Waypoints are token positions (top-left, picture px, size in grid units); later waypoints win shared cells.
+export function getPerspectivePathCells(waypoints) {
+  if (!state.active || !waypoints?.length) return [];
+  const camera = state.saved;
+  const size = canvas.grid.size;
+  const cells = new Map();
+  const cover = (waypoint, u, v) => {
+    const width = Math.max(Math.round(waypoint.width ?? 1), 1);
+    const height = Math.max(Math.round(waypoint.height ?? 1), 1);
+    const column = Math.round(u - (width / 2));
+    const row = Math.round(v - (height / 2));
+    for (let i = column; i < column + width; i++) {
+      for (let j = row; j < row + height; j++) {
+        const corners = [[i, j], [i + 1, j], [i + 1, j + 1], [i, j + 1]].map(([a, b]) => floorToPicture(camera, a * size, b * size));
+        if (corners.some(p => !p.valid)) continue;
+        const { x, y } = floorToPicture(camera, (i + 0.5) * size, (j + 0.5) * size);
+        cells.set(`${i},${j}`, { waypoint, points: corners.flatMap(p => [p.x, p.y]), center: { x, y } });
+      }
+    }
+  };
+  let previous = null;
+  for (const waypoint of waypoints) {
+    const width = waypoint.width ?? 1;
+    const height = waypoint.height ?? 1;
+    const floor = pictureToFloor(camera, waypoint.x + (width * size / 2), waypoint.y + (height * size / 2));
+    if (!floor.valid) {
+      previous = null;
+      continue;
+    }
+    const u = snapAxis(floor.x / size, width, camera.column0, camera.columns);
+    const v = snapAxis(floor.y / size, height, camera.row0, camera.rows);
+    if (previous) {
+      // Step through the cells in between, diagonally first, as tokens walk
+      let { u: pu, v: pv } = previous;
+      while ((Math.abs(u - pu) > 1e-6) || (Math.abs(v - pv) > 1e-6)) {
+        pu += Math.sign(u - pu) * Math.min(1, Math.abs(u - pu));
+        pv += Math.sign(v - pv) * Math.min(1, Math.abs(v - pv));
+        cover(waypoint, pu, pv);
+      }
+    }
+    cover(waypoint, u, v);
+    previous = { u, v };
+  }
+  return [...cells.values()];
+}
+
 // Wrap Foundry's snapping, keyboard movement and measurement (installed once, on init).
 export function installPerspectivePatches() {
   const TokenDocument = foundry.documents.TokenDocument;
   const originalSnap = TokenDocument.prototype.getSnappedPosition;
   TokenDocument.prototype.getSnappedPosition = function (data = {}) {
     const snapped = originalSnap.call(this, data);
-    if (!state.active || !this.parent || (this.parent !== canvas.scene)) return snapped;
+    if (!state.active || floorComputations || !this.parent || (this.parent !== canvas.scene)) return snapped;
     const position = snapTokenPosition(this, data);
     if (position) return { ...snapped, ...position };
     return { ...snapped, x: data.x ?? this.x, y: data.y ?? this.y };
@@ -566,10 +701,11 @@ export function installPerspectivePatches() {
   const originalMeasure = BaseGrid.prototype.measurePath;
   BaseGrid.prototype.measurePath = function (waypoints, options) {
     const scene = canvas.scene;
-    if (!state.active || !scene || ((this !== scene.grid) && (this !== scene.gridlessGrid))) {
+    if (!state.active || floorComputations || !scene || ((this !== scene.grid) && (this !== scene.gridlessGrid))) {
       return originalMeasure.call(this, waypoints, options);
     }
-    return originalMeasure.call(this, waypoints.map(waypoint => toFloorWaypoint(this, waypoint)), options);
+    const floorOptions = (typeof options?.cost === "function") ? { ...options, cost: onPictureCost(this, options.cost) } : options;
+    return originalMeasure.call(this, waypoints.map(waypoint => toFloorWaypoint(this, waypoint)), floorOptions);
   };
 
   Hooks.on("deleteTile", (document) => removeWarpedTile(document.id));
@@ -844,12 +980,22 @@ export function applyPerspectiveToPlaceable(object) {
 
 // ----------------- Standing images -----------------
 
+export const STANDING_HEIGHT = 1.7;   // cells
 const standingTextures = new Map();   // src -> PIXI.Texture once loaded, a Promise while loading, null if it failed
 
-// The full-height art of a token for when it stands (its Isometric tab), once loaded
+// Where the full-height art of a standing token comes from: its Standing Image, or else the actor portrait.
+// Without either (no actor, or the default portrait) the token keeps its own image.
+export function getStandingSource(token) {
+  const image = token.document?.getFlag(isometricModuleConfig.MODULE_ID, "perspectiveStandingImage");
+  if (image) return image;
+  const portrait = token.actor?.img;
+  const defaults = [CONST.DEFAULT_TOKEN, foundry.documents.BaseActor?.DEFAULT_ICON];
+  return (portrait && !defaults.includes(portrait)) ? portrait : null;
+}
+
+// The full-height art of a token for when it stands, once loaded
 export function getStandingImage(token) {
-  const MODULE_ID = isometricModuleConfig.MODULE_ID;
-  const src = token.document?.getFlag(MODULE_ID, "perspectiveStandingImage");
+  const src = getStandingSource(token);
   if (!src) return null;
   const cached = standingTextures.get(src);
   if (cached instanceof PIXI.Texture) return cached.valid ? cached : null;
@@ -858,7 +1004,7 @@ export function getStandingImage(token) {
     const loading = Promise.resolve(load(src)).then(texture => {
       standingTextures.set(src, texture ?? null);
       for (const t of canvas.tokens?.placeables ?? []) {
-        if (t.document.getFlag(MODULE_ID, "perspectiveStandingImage") === src) t.renderFlags.set({ refreshMesh: true, refreshSize: true });
+        if (getStandingSource(t) === src) t.renderFlags.set({ refreshMesh: true, refreshSize: true });
       }
     }).catch(() => standingTextures.set(src, null));
     standingTextures.set(src, loading);
@@ -868,7 +1014,7 @@ export function getStandingImage(token) {
 
 // Height of the standing art, in cells
 export function getStandingHeight(token) {
-  return Math.clamp(readNumber(token.document?.getFlag(isometricModuleConfig.MODULE_ID, "perspectiveStandingHeight"), 1.5), 0.25, 4);
+  return Math.clamp(readNumber(token.document?.getFlag(isometricModuleConfig.MODULE_ID, "perspectiveStandingHeight"), STANDING_HEIGHT), 0.25, 4);
 }
 
 // Put the standing art on the token mesh, or give the mesh its own texture back. Dynamic rings are left out
@@ -931,6 +1077,7 @@ function placeToken(object, center, bounce = 1) {
     );
     mesh.anchor.set(doc.texture.anchorX, doc.texture.anchorY);
     mesh.transform.setFromMatrix(meshMatrix);
+    removeElevationMarker(object);
     restoreEffects(object);
     drawFootprint(object, center, (q) => ({
       x: object.pivot.x + (((J.yy * (q.x - object.position.x)) - (J.xy * (q.y - object.position.y))) / det),
@@ -948,17 +1095,21 @@ function placeToken(object, center, bounce = 1) {
   object.scale.set(s, s);
   object.pivot.set(halfX + (offsetX / s), halfY + (offsetY / s));
 
+  // The bounce of a walk animation lifts the art a little on each step instead of growing it, which would stretch
+  // a full-height figure
+  const hop = (bounce - 1) * STEP_HOP * Math.abs(base.y) * mesh.texture.height;
   const ratio = canvas.grid.size / 100;
   const right = (doc.getFlag(MODULE_ID, 'offsetY') ?? 0) * ratio;
-  let up = (doc.getFlag(MODULE_ID, 'offsetX') ?? 0) * ratio;
-  if (state.heightAdjust) up += (doc.elevation ?? 0) * canvas.grid.size / canvas.grid.distance;
+  const lift = state.heightAdjust ? (doc.elevation ?? 0) * canvas.grid.size / canvas.grid.distance : 0;
+  const up = ((doc.getFlag(MODULE_ID, 'offsetX') ?? 0) * ratio) + lift + hop;
   mesh.anchor.set(0.5, 1);
-  meshMatrix.set(s * baseX, 0, 0, s * baseY, center.x + (s * right), center.y - (s * up));
+  meshMatrix.set(s * base.x, 0, 0, s * base.y, center.x + (s * right), center.y - (s * up));
   mesh.transform.setFromMatrix(meshMatrix);
+  drawElevationMarker(object, J, s, s * base.x, s * base.y, { x: -s * right, y: s * up }, s * lift);
 
   // Let the standing art be clicked, not only its footprint (token-local, unscaled px)
-  const artWidth = Math.abs(baseX) * mesh.texture.width;
-  const artHeight = Math.abs(baseY) * mesh.texture.height;
+  const artWidth = Math.abs(base.x) * mesh.texture.width;
+  const artHeight = Math.abs(base.y) * mesh.texture.height;
   const artLeft = (width / 2) + right - (artWidth / 2);
   const artRight = artLeft + artWidth;
   const artTop = (height / 2) - up - artHeight;
@@ -991,11 +1142,73 @@ function drawFootprint(object, center, toLocal) {
     { alignment: 1, dashed: object.document.hidden });
 }
 
+// Tokens lifted by their elevation (Enable Height Adjustment): a faint shadow on their cell and a dashed line up to
+// their feet, so it is clear where on the floor a flying token is (Enable Token Visuals). Drawn with the token art,
+// so it is lit, hidden and sorted like it. `ground` is the cell center seen from the feet and `lift` the height of
+// the feet above it, in picture px; `s` is the size of the floor there.
+function drawElevationMarker(object, J, s, scaleX, scaleY, ground, lift) {
+  const mesh = object.mesh;
+  if (!(lift > 0) || !game.settings.get(isometricModuleConfig.MODULE_ID, "enableTokenVisuals")) {
+    removeElevationMarker(object);
+    return;
+  }
+  let marker = mesh._isoElevationMarker;
+  if (!marker || marker.destroyed || (marker.parent !== mesh)) {
+    marker = mesh._isoElevationMarker = mesh.addChild(new PIXI.Graphics());
+    marker.name = "isometric-elevation-marker";
+    marker.eventMode = "none";
+  }
+  // Undo the scale of the art, to draw in picture px
+  marker.transform.setFromMatrix(markerMatrix.set(1 / scaleX, 0, 0, 1 / scaleY, 0, 0));
+  marker.clear();
+
+  // The shadow lies on the floor: a circle on the cell, seen through the camera
+  const radius = 0.3 * canvas.grid.size * Math.min(object.document.width, object.document.height);
+  const shadow = [];
+  for (let i = 0; i < 32; i++) {
+    const a = 2 * Math.PI * i / 32;
+    const dx = radius * Math.cos(a);
+    const dy = radius * Math.sin(a);
+    shadow.push(ground.x + (J.xx * dx) + (J.xy * dy), ground.y + (J.yx * dx) + (J.yy * dy));
+  }
+  marker.beginFill(0x000000, 0.25).drawPolygon(shadow).endFill();
+
+  const top = { x: ground.x, y: ground.y - lift };
+  const size = canvas.grid.size * s;
+  drawDashedLine(marker, ground, top, { width: Math.max(size * 0.04, 1) + 2, dash: size * 0.08, gap: size * 0.06, color: 0x000000, alpha: 0.3 });
+  drawDashedLine(marker, ground, top, { width: Math.max(size * 0.04, 1), dash: size * 0.08, gap: size * 0.06, color: 0xFFFFFF, alpha: 0.65 });
+}
+
+function removeElevationMarker(object) {
+  const mesh = object.mesh;
+  const marker = mesh?._isoElevationMarker;
+  if (!marker) return;
+  if (!marker.destroyed) marker.destroy();
+  delete mesh._isoElevationMarker;
+}
+
+// A dashed line, as PIXI only draws solid ones
+export function drawDashedLine(graphics, from, to, { width, dash, gap, color, alpha }) {
+  const length = Math.hypot(to.x - from.x, to.y - from.y);
+  if (!(length > 0) || !(dash > 0)) return;
+  const ux = (to.x - from.x) / length;
+  const uy = (to.y - from.y) / length;
+  graphics.lineStyle({ width, color, alpha, cap: PIXI.LINE_CAP.ROUND });
+  for (let d = 0; d < length; d += dash + gap) {
+    const e = Math.min(d + dash, length);
+    graphics.moveTo(from.x + (ux * d), from.y + (uy * d));
+    graphics.lineTo(from.x + (ux * e), from.y + (uy * e));
+  }
+  graphics.lineStyle(0);
+}
+
 // Status effects of a standing token: a column beside the art, from its top down (token-local, unscaled px).
 // Same icon size and background as Foundry, which lays them out over the footprint instead.
-function layoutStandingEffects(object, artLeft, artRight, artTop, artHeight) {
+// `frame` places the effects container (isometric scenes turn it upright), otherwise it sits on the token.
+export function layoutStandingEffects(object, artLeft, artRight, artTop, artHeight, frame = null) {
   const effects = object.effects;
   if (!effects || effects.destroyed) return;
+  setEffectsFrame(effects, frame);
   const s = canvas.dimensions.uiScale;
   const size = 20 * s;
   const rows = Math.max(1, Math.floor((artHeight / size) + 1e-6));
@@ -1018,10 +1231,18 @@ function layoutStandingEffects(object, artLeft, artRight, artTop, artHeight) {
   effects._isoPerspectiveColumn = true;
 }
 
+function setEffectsFrame(effects, frame) {
+  effects.position.set(frame?.x ?? 0, frame?.y ?? 0);
+  effects.rotation = frame?.rotation ?? 0;
+  effects.skew.set(frame?.skewX ?? 0, frame?.skewY ?? 0);
+  effects.scale.set(frame?.scaleX ?? 1, frame?.scaleY ?? 1);
+}
+
 // Give a token that lies flat (again) Foundry's own status layout
-function restoreEffects(object) {
+export function restoreEffects(object) {
   if (!object.effects?._isoPerspectiveColumn) return;
   object.effects._isoPerspectiveColumn = false;
+  setEffectsFrame(object.effects, null);
   object._refreshEffects?.();
 }
 
@@ -1058,10 +1279,11 @@ function guardTokens() {
   }
 }
 
-// Only step in for movement animations (Smooth Move owns the mesh while _smActive is set, and its last frame),
-// or when the size was reset from the document outside of a refresh. Other effects on the mesh are left alone.
+// Only step in for movement animations (Smooth Move owns the mesh while _smActive is set and its last frame, and
+// moves it around drags and commits), or when the size was reset from the document outside of a refresh.
+// Other effects on the mesh are left alone.
 function shouldRestore(token) {
-  const animating = !!token._smActive;
+  const animating = !!(token._smActive || token._smCommitting || token._smStartPx);
   const justAnimated = !!token._isoWasAnimating;
   token._isoWasAnimating = animating;
   return animating || justAnimated || matchesDocumentScale(token);
@@ -1127,14 +1349,21 @@ function guardIsometricToken(token) {
     || (mesh.scale.x !== p.appliedX) || (mesh.scale.y !== p.appliedY);
   if (!changed || !shouldRestore(token)) return;
 
-  const center = moved ? { x: mesh.position.x, y: mesh.position.y } : { x: p.x - p.offsetX, y: p.y - p.offsetY };
+  const center = moved ? { x: mesh.position.x, y: mesh.position.y } : { x: p.cx ?? (p.x - p.offsetX), y: p.cy ?? (p.y - p.offsetY) };
   const bounce = animationBounce(token, "y");
   mesh.rotation = p.rotation;
   mesh.skew.set(p.skewX, p.skewY);
-  mesh.scale.set(p.scaleX * bounce, p.scaleY * bounce);
   mesh.anchor.set(p.anchorX, p.anchorY);
-  mesh.position.set(center.x + p.offsetX, center.y + p.offsetY);
-  Object.assign(p, { x: mesh.position.x, y: mesh.position.y, appliedX: mesh.scale.x, appliedY: mesh.scale.y });
+  if (mesh._isoStandingAnchor) {
+    // Standing art steps up along its own height instead of growing (see placeToken)
+    const hop = (bounce - 1) * STEP_HOP * Math.abs(p.scaleY) * mesh.texture.height;
+    mesh.scale.set(p.scaleX, p.scaleY);
+    mesh.position.set(center.x + p.offsetX + (Math.sin(p.rotation) * hop), center.y + p.offsetY - (Math.cos(p.rotation) * hop));
+  } else {
+    mesh.scale.set(p.scaleX * bounce, p.scaleY * bounce);
+    mesh.position.set(center.x + p.offsetX, center.y + p.offsetY);
+  }
+  Object.assign(p, { x: mesh.position.x, y: mesh.position.y, cx: center.x, cy: center.y, appliedX: mesh.scale.x, appliedY: mesh.scale.y });
 }
 
 // Called by the isometric transformation once a token mesh is in place

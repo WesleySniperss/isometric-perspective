@@ -1,6 +1,6 @@
 import { isometricModuleConfig } from './consts.js';
 import { cartesianToIso } from './utils.js';
-import { isPerspectiveActive } from './perspective.js';
+import { isPerspectiveActive, getPerspectivePathCells } from './perspective.js';
 
 /**
  * Helper to apply isometric adjustments to label context.
@@ -84,15 +84,95 @@ function extendTokenRuler() {
       class TokenRulerIsometric extends ParentRuler {
         get _isIsometricRuler() { return true; }
 
+        // Highlight of the perspective cells along the path (perspective scenes)
+        #perspectiveLayer = null;
+        #perspectiveLayerName = null;
+        #preparedPaths = null;
+
         _getWaypointLabelContext(waypoint, state) {
           const ctx = super._getWaypointLabelContext(waypoint, state);
           return applyIsometricLabelAdjustments(ctx, this.sourceToken);
         }
 
-        // The square grid spaces of the scene don't match the perspective cells, don't highlight them
+        // The square grid spaces of the scene don't match the perspective cells, which are highlighted instead
         _getGridHighlightStyle(waypoint, offset) {
           if (isPerspectiveActive()) return {alpha: 0};
           return super._getGridHighlightStyle(waypoint, offset);
+        }
+
+        // Foundry builds every path it draws through here: keep them for the perspective highlight
+        _preparePath(path) {
+          super._preparePath(path);
+          this.#preparedPaths?.push(path);
+        }
+
+        refresh(options) {
+          this.#preparedPaths = [];
+          try {
+            super.refresh(options);
+          } finally {
+            const paths = this.#preparedPaths;
+            this.#preparedPaths = null;
+            try {
+              this.#highlightPerspectiveCells(paths, options);
+            } catch (error) {
+              console.error("Isometric Perspective | highlighting the perspective cells of the ruler failed", error);
+            }
+          }
+        }
+
+        clear() {
+          super.clear();
+          this.#perspectiveLayer?.clear();
+        }
+
+        destroy() {
+          super.destroy();
+          if (this.#perspectiveLayerName) canvas.interface.grid.destroyHighlightLayer(this.#perspectiveLayerName);
+          this.#perspectiveLayer = null;
+        }
+
+        _onVisibleChange() {
+          super._onVisibleChange();
+          if (this.#perspectiveLayer) this.#perspectiveLayer.visible = this.visible;
+        }
+
+        // Same paths and colors as Foundry's grid highlight: the moved path, then what other users plan (own path on
+        // top), without the part of a planned path already walked. `paths` are the paths Foundry built, in that order.
+        #highlightPerspectiveCells(paths, {plannedMovement = {}} = {}) {
+          if (!isPerspectiveActive() || !paths?.length) {
+            this.#perspectiveLayer?.clear();
+            return;
+          }
+          if (!this.#perspectiveLayer) {
+            this.#perspectiveLayerName = `TokenRuler.${this.token.document.id}${this.token.isPreview ? ".preview" : ""}.perspective`;
+            this.#perspectiveLayer = canvas.interface.grid.addHighlightLayer(this.#perspectiveLayerName);
+          }
+          const layer = this.#perspectiveLayer;
+          layer.clear();
+          layer.visible = this.visible;
+          const planned = Object.entries(plannedMovement);
+          const self = planned.findIndex(([userId]) => userId === game.user.id);
+          if (self >= 0) planned.push(...planned.splice(self, 1));
+          const highlighted = paths.map((path, i) => (i > 0) ? path.slice(planned[i - 1]?.[1].history?.length ?? 0) : path);
+          for (const path of highlighted) {
+            for (const {waypoint, points, center} of getPerspectivePathCells(path)) {
+              const {color = 0xFFFFFF, alpha = 0.5, texture = PIXI.Texture.WHITE, matrix = null} = this.#highlightStyle(waypoint, center);
+              if (!(alpha > 0)) continue;
+              layer.beginTextureFill({texture, color, alpha, matrix, smooth: true});
+              layer.drawPolygon(points);
+              layer.endFill();
+            }
+          }
+        }
+
+        // The style of the ruler (and of the systems extending it), or Foundry's default should it fail
+        #highlightStyle(waypoint, center) {
+          try {
+            return ParentRuler.prototype._getGridHighlightStyle.call(this, waypoint, canvas.grid.getOffset(center));
+          } catch (error) {
+            return {color: game.users.get(waypoint.userId)?.color ?? 0x000000, alpha: 0.5};
+          }
         }
       }
 

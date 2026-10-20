@@ -9,6 +9,7 @@ import {
   readStandingTokens,
   configurePerspective,
   isPerspectiveActive,
+  isPerspectiveMapWarped,
   isPerspectiveSaved,
   applyPerspective,
   previewPerspective,
@@ -153,8 +154,9 @@ function initPerspectiveFields(app, html, container, projectionSelect) {
   const preview = () => previewPerspective(scene, readForm());
   container.addEventListener('input', preview);
   container.addEventListener('change', preview);
-  // switching between grid only and grid and map
+  // switching between grid only and grid and map, and which tokens stand (set for every projection)
   projectionSelect.addEventListener('change', preview);
+  standing?.addEventListener('change', preview);
 }
 
 // closing the scene configuration without saving drops the preview
@@ -197,15 +199,18 @@ export function handleUpdateScene(scene, changes, options, userId) {
       }
     }
 
-    // Switching in or out of the perspective view changes how every mesh is built,
-    // so redraw the canvas instead of patching the existing meshes.
+    // Switching in or out of the perspective view (or putting the map in perspective) changes how every mesh is
+    // built, so redraw the canvas instead of patching the existing meshes.
     const wasPerspective = isPerspectiveActive();
+    const wasWarped = isPerspectiveMapWarped();
     const previousCamera = getSavedCamera();
     const isPerspective = configurePerspective(scene);
-    if (wasPerspective !== isPerspective) {
-      // tokens keep their cells: floor positions outside of the perspective view, picture positions inside
-      const moved = (userId === game.user.id)
-        ? convertTokenPositions(scene, wasPerspective ? previousCamera : null, isPerspective ? getSavedCamera() : null)
+    const isWarped = isPerspectiveMapWarped();
+    if ((wasPerspective !== isPerspective) || (wasWarped !== isWarped)) {
+      // tokens stay on the map: only "Grid and Map" moves the map (and its tokens) through the camera,
+      // "Grid Only" and the other projections keep them where they are on the map image
+      const moved = ((userId === game.user.id) && (wasWarped !== isWarped))
+        ? convertTokenPositions(scene, wasWarped ? previousCamera : null, isWarped ? getSavedCamera() : null)
         : Promise.resolve();
       moved.catch(error => console.error("Isometric Perspective | moving tokens for the new projection failed", error))
         .finally(() => canvas.draw());

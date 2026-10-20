@@ -73,6 +73,7 @@ import {
 } from "./scene.js";
 
 import { installPerspectivePatches, clearPerspectiveObjects } from "./perspective.js";
+import { installPerspectiveShapes } from "./perspective-shapes.js";
 
 import { registerRuler } from "./ruler.js";
 
@@ -120,7 +121,7 @@ Hooks.once("init", function () {
       hint: game.i18n.localize("isometric-perspective.settings_visuals_hint"), //hint: 'Displays a circular shadow and a vertical red line to indicate token elevation. Requires "Enable Height Adjustment" to be active.',
       scope: "client",
       config: true,
-      default: false,
+      default: true,
       type: Boolean,
       requiresReload: true,
     },
@@ -347,6 +348,7 @@ Hooks.on("init", () => {
   CONFIG.Tile.objectClass = isoDepthSortTileMixin(CONFIG.Tile.objectClass);
   wrapTileTestOcclusion();
   installPerspectivePatches();
+  installPerspectiveShapes();
 });
 
 /**
