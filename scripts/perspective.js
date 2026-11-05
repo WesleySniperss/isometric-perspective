@@ -47,8 +47,9 @@ const MIN_DEPTH = 0.15;        // nearest drawable depth, relative to the center
 const MAP_SUBDIVISIONS = 48;   // warped images are drawn as a mesh of this many quads per side
 const EDIT_COLOR = 0xFF9829;   // outline of the grid while the scene configuration is open
 const STEP_HOP = 0.5;          // standing art hops by this share of the walk bounce times its height (12% bounce: 6%)
-export const SHADOW_RADIUS = 0.36;   // of the shadow under standing tokens, per px of token size
-const SHADOW_ALPHA = 0.5;      // in its middle
+export const SHADOW_RADIUS = 0.44;   // of the shadow under standing tokens, per px of token size (it fades out)
+const SHADOW_ALPHA = 0.62;     // in its middle
+const BORDER_SNAP = 0.2;       // the selection border lies on the cell of a token this close to it (in cells)
 const NEIGHBOR_STEPS = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 const NO_CAMERA = Object.freeze({ m: IDENTITY, inv: IDENTITY, column0: 0, row0: 0, columns: 1, rows: 1 });
 
@@ -72,6 +73,7 @@ const tokenMatrix = new PIXI.Matrix();
 const meshMatrix = new PIXI.Matrix();
 const markerMatrix = new PIXI.Matrix();
 const effectsMatrix = new PIXI.Matrix();
+const shadowMatrix = new PIXI.Matrix();
 const cameraListeners = [];
 let cameraKey = "";
 let floorComputations = 0;   // > 0 while Foundry code runs on the floor (region shapes, see perspective-shapes.js)
@@ -678,6 +680,20 @@ export function installPerspectivePatches() {
   };
 
   const Token = foundry.canvas.placeables.Token;
+
+  // In isometric and perspective scenes the selection border lies on the cell (its grid lines), not outside of it,
+  // where it would look raised above the grid
+  const originalRefreshBorder = Token.prototype._refreshBorder;
+  if (typeof originalRefreshBorder === "function") {
+    Token.prototype._refreshBorder = function () {
+      const scene = this.scene;
+      const isometric = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag")
+        && scene?.getFlag(isometricModuleConfig.MODULE_ID, "isometricEnabled");
+      if (!isometric || !this.border || !this.shape) return originalRefreshBorder.call(this);
+      foundry.canvas.borders.drawBorder(this.border, this.shape, { alignment: 0.5, dashed: this.document.hidden });
+    };
+  }
+
   const originalShift = Token.prototype._getShiftedPosition;
   if (typeof originalShift === "function") {
     Token.prototype._getShiftedPosition = function (dx, dy, dz) {
@@ -1098,8 +1114,15 @@ function placeToken(object, center, bounce = 1) {
     // The lift in token coordinates (the token is slanted like its cell): the lifted art can be clicked too
     const liftX = (J.xy * lift) / det;
     const liftY = (-J.xx * lift) / det;
-    const shape = object.shape;
-    object.hitArea = lift ? { contains: (x, y) => shape.contains(x, y) || shape.contains(x - liftX, y - liftY) } : shape;
+    // (its shape read when tested: it can be placed before Foundry has built the shape)
+    if (lift) {
+      object.hitArea = {
+        contains: (x, y) => {
+          const shape = object.shape;
+          return !!shape && (shape.contains(x, y) || shape.contains(x - liftX, y - liftY));
+        }
+      };
+    } else if (object.shape) object.hitArea = object.shape;
 
     const angle = Math.toRadians(doc.lockRotation ? 0 : doc.rotation);
     const cos = Math.cos(angle);
@@ -1112,11 +1135,7 @@ function placeToken(object, center, bounce = 1) {
     mesh.anchor.set(doc.texture.anchorX, doc.texture.anchorY);
     mesh.transform.setFromMatrix(meshMatrix);
     drawElevationMarker(object, s, meshMatrix, { x: 0, y: lift }, lift);
-    const floor = (lift > 0) ? pictureToFloor(state.current, center.x, center.y) : null;
-    if (floor?.valid) {
-      const radius = SHADOW_RADIUS * Math.min(width, height);
-      drawStandingShadow(object, floorEllipse(state.current, floor, radius, radius).flatMap(p => [p.x, p.y]));
-    }
+    if (lift > 0) drawStandingShadow(object, center, floorDisc(J, SHADOW_RADIUS * Math.min(width, height)));
     else removeStandingShadow(object);
     // Status icons stay upright on the slanted token: the effects undo its transform, keeping the size of the floor
     restoreEffects(object, effectsMatrix.set((s * J.yy) / det, (-s * J.yx) / det, (-s * J.xy) / det, (s * J.xx) / det, liftX, liftY),
@@ -1164,76 +1183,81 @@ function placeToken(object, center, bounce = 1) {
     x: object.pivot.x + ((q.x - object.position.x) / s),
     y: object.pivot.y + ((q.y - object.position.y) / s)
   }));
-  const floor = pictureToFloor(state.current, center.x, center.y);
-  if (floor.valid) {
-    const radius = SHADOW_RADIUS * Math.min(width, height);
-    drawStandingShadow(object, floorEllipse(state.current, floor, radius, radius).flatMap(p => [p.x, p.y]));
-  }
+  drawStandingShadow(object, center, floorDisc(J, SHADOW_RADIUS * Math.min(width, height)));
   recordPlacement(object, center);
 }
 
-// The selection border follows the cells the token stands on, as drawn in perspective.
+// The selection border follows the cells the token stands on, as drawn in perspective: the cells it is snapped to,
+// so the border lies on the grid lines (centered on them, not outside of them).
 // `toLocal` turns a picture point into the token's own coordinates.
 function drawFootprint(object, center, toLocal) {
   const border = object.border;
   if (!border || border.destroyed) return;
-  const floor = pictureToFloor(state.current, center.x, center.y);
+  const camera = state.current;
+  const floor = pictureToFloor(camera, center.x, center.y);
   if (!floor.valid) return;
-  const { width, height } = object.document.getSize();
+  const doc = object.document;
+  const { width, height } = doc.getSize();
+  const size = canvas.grid.size;
+  const u = floor.x / size;
+  const v = floor.y / size;
+  const onGrid = (u >= camera.column0) && (u <= camera.column0 + camera.columns) && (v >= camera.row0) && (v <= camera.row0 + camera.rows);
+  // a token placed between cells (no snapping) keeps its border where it is
+  const su = onGrid ? snapAxis(u, doc.width, camera.column0, camera.columns) : u;
+  const sv = onGrid ? snapAxis(v, doc.height, camera.row0, camera.rows) : v;
+  const onCell = (Math.abs(su - u) < BORDER_SNAP) && (Math.abs(sv - v) < BORDER_SNAP);
+  const x = onCell ? su * size : floor.x;
+  const y = onCell ? sv * size : floor.y;
   const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
-    const p = floorToPicture(state.current, floor.x + (sx * width / 2), floor.y + (sy * height / 2));
+    const p = floorToPicture(camera, x + (sx * width / 2), y + (sy * height / 2));
     return toLocal(p);
   });
   if (corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return;
   foundry.canvas.borders.drawBorder(border, new PIXI.Polygon(corners.flatMap(p => [p.x, p.y])),
-    { alignment: 1, dashed: object.document.hidden });
+    { alignment: 0.5, dashed: doc.hidden });
 }
 
-// Points of an ellipse on the floor (center and radii in floor px), seen through a camera
-function floorEllipse(camera, center, rx, ry, count = 32) {
-  const points = [];
-  for (let i = 0; i < count; i++) {
-    const a = 2 * Math.PI * i / count;
-    points.push(floorToPicture(camera, center.x + (rx * Math.cos(a)), center.y + (ry * Math.sin(a))));
-  }
-  return points;
+// A disc on the floor around a cell center in perspective: the circle of `radius` floor px, seen through the camera
+// there (J), as the linear part of a matrix for drawStandingShadow
+function floorDisc(J, radius) {
+  return { a: J.xx * radius, b: J.yx * radius, c: J.xy * radius, d: J.yy * radius };
 }
 
-// A soft shadow on the floor under a standing token, so it is clear which cell it stands on. `points` is a polygon in
-// canvas coordinates ([x0, y0, x1, y1...]). It lies in the primary group right below the token art (see syncShadow).
-export function drawStandingShadow(token, points) {
+// A round, soft-edged shadow: a radial gradient, darkest in the middle, made once
+let shadowTexture = null;
+const SHADOW_TEXTURE_SIZE = 128;
+function getShadowTexture() {
+  if (shadowTexture?.baseTexture && !shadowTexture.baseTexture.destroyed) return shadowTexture;
+  const size = SHADOW_TEXTURE_SIZE;
+  const image = document.createElement("canvas");
+  image.width = image.height = size;
+  const context = image.getContext("2d");
+  const gradient = context.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+  gradient.addColorStop(0, `rgba(0, 0, 0, ${SHADOW_ALPHA})`);
+  gradient.addColorStop(0.4, `rgba(0, 0, 0, ${SHADOW_ALPHA * 0.82})`);
+  gradient.addColorStop(0.75, `rgba(0, 0, 0, ${SHADOW_ALPHA * 0.35})`);
+  gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, size, size);
+  return shadowTexture = PIXI.Texture.from(image);
+}
+
+// A soft shadow on the floor under a standing token, so it is clear which cell it stands on. `center` is the cell
+// center in canvas coordinates and `disc` the linear part of a matrix that turns a circle of radius 1 into the shadow
+// (in isometric scenes a plain circle, the stage lays it on the floor). It lies in the primary group right below the
+// token art (see syncShadow).
+export function drawStandingShadow(token, center, disc) {
   let shadow = token._isoShadow;
   if (!shadow || shadow.destroyed) {
-    shadow = token._isoShadow = new PIXI.Graphics();
+    shadow = token._isoShadow = new PIXI.Sprite(getShadowTexture());
     shadow.name = "isometric-standing-shadow";
     shadow.eventMode = "none";
+    shadow.anchor.set(0.5, 0.5);
   }
   if (shadow.parent !== canvas.primary) canvas.primary.addChild(shadow);
-  const count = points.length / 2;
-  let cx = 0;
-  let cy = 0;
-  for (let i = 0; i < points.length; i += 2) {
-    cx += points[i] / count;
-    cy += points[i + 1] / count;
-  }
-  // Three rings, darker to the middle, for a soft edge
-  shadow.clear();
-  for (const k of [1, 0.72, 0.45]) {
-    shadow.beginFill(0x000000, SHADOW_ALPHA / 3);
-    shadow.drawPolygon(points.map((v, i) => (i % 2) ? cy + ((v - cy) * k) : cx + ((v - cx) * k)));
-    shadow.endFill();
-  }
+  const k = 2 / SHADOW_TEXTURE_SIZE;
+  shadow.transform.setFromMatrix(shadowMatrix.set(disc.a * k, disc.b * k, disc.c * k, disc.d * k, center.x, center.y));
   syncShadow(token);
-}
-
-// A circle on the floor of an isometric scene (stage coordinates), for drawStandingShadow
-export function shadowCircle(x, y, radius, count = 32) {
-  const points = [];
-  for (let i = 0; i < count; i++) {
-    const a = 2 * Math.PI * i / count;
-    points.push(x + (radius * Math.cos(a)), y + (radius * Math.sin(a)));
-  }
-  return points;
 }
 
 export function removeStandingShadow(token) {
@@ -1395,8 +1419,16 @@ export function installTokenGuard() {
 }
 
 function guardTokens() {
-  if (!canvas.ready) return;
-  for (const token of getTokens()) {
+  if (!canvas.ready || !canvas.tokens) return;
+  // nothing to keep in place on a scene that is not isometric (Foundry draws its tokens)
+  if (!state.active && !canvas.scene?.getFlag(isometricModuleConfig.MODULE_ID, "isometricEnabled")) return;
+  guardTokenList(canvas.tokens.placeables);
+  const preview = canvas.tokens.preview?.children;
+  if (preview?.length) guardTokenList(preview);
+}
+
+function guardTokenList(tokens) {
+  for (const token of tokens) {
     const mesh = token.mesh;
     if (!mesh || mesh.destroyed || token.destroyed) continue;
     if (state.active) guardPerspectiveToken(token);
@@ -1491,7 +1523,8 @@ function guardIsometricToken(token) {
   }
   // The shadow walks along on the floor
   if (moved && token._isoShadow && token._isoShadowRadius) {
-    drawStandingShadow(token, shadowCircle(center.x, center.y, token._isoShadowRadius));
+    const radius = token._isoShadowRadius;
+    drawStandingShadow(token, center, { a: radius, b: 0, c: 0, d: radius });
   }
   Object.assign(p, { x: mesh.position.x, y: mesh.position.y, cx: center.x, cy: center.y, appliedX: mesh.scale.x, appliedY: mesh.scale.y });
 }

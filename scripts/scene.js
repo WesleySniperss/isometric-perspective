@@ -221,6 +221,10 @@ export function handleUpdateScene(scene, changes, options, userId) {
       updateIsometricConstants(projectionType);
       applyIsometricPerspective(scene, isIsometric);
       applyBackgroundTransformation(scene, isIsometric, shouldTransformBackground);
+      // a scene that is no longer isometric gets Foundry's own drawing back (no upright art, no shadows)
+      if (!isIsometric) {
+        for (const object of [...canvas.tokens.placeables, ...canvas.tiles.placeables]) object.renderFlags.set({ refresh: true });
+      }
       // tokens stay on their cell when the camera changes (moved once, by whoever saved)
       if (userId === game.user.id) reprojectTokens(previousCamera);
     });

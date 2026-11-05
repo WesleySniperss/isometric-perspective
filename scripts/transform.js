@@ -16,7 +16,6 @@ import {
   layoutStandingEffects,
   restoreEffects,
   drawStandingShadow,
-  shadowCircle,
   removeStandingShadow,
   SHADOW_RADIUS,
   drawDashedLine,
@@ -72,16 +71,11 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
   // Disable isometric token projection, if the flag is active
   let isoTileDisabled = object.document.getFlag(isometricModuleConfig.MODULE_ID, 'isoTileDisabled') ?? 0;
   let isoTokenDisabled = object.document.getFlag(isometricModuleConfig.MODULE_ID, 'isoTokenDisabled') ?? 0;
-  if (isoTileDisabled || isoTokenDisabled) {
-    object.mesh.anchor.set(0.5, 0.5);  // This is set to make isometric anchor don't mess with non-iso scenes
+  // Not isometric (the scene, or this token or tile): Foundry's own drawing, with its own anchor
+  if (isoTileDisabled || isoTokenDisabled || !isSceneIsometric) {
     if (object instanceof canvasToken) leaveIsometric(object);
-    return
-  }
-
-  // Don't make transformation on the token or tile if the scene isn't isometric
-  if (!isSceneIsometric) {
-    object.mesh.anchor.set(0.5, 0.5);  // This is set to make isometric anchor don't mess with non-iso scenes
-    if (object instanceof canvasToken) leaveIsometric(object);
+    const anchor = foundryAnchor(object);
+    object.mesh.anchor.set(anchor.x, anchor.y);
     return;
   }
 
@@ -225,7 +219,7 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
     else restoreEffects(object, inverseStage(), stagePoint(object.w / 2, object.h / 2));
     const radius = SHADOW_RADIUS * Math.min(object.w, object.h);
     object._isoShadowRadius = radius;
-    drawStandingShadow(object, shadowCircle(object.center.x, object.center.y, radius));
+    drawStandingShadow(object, object.center, { a: radius, b: 0, c: 0, d: radius });
     // remembered so movement animations of other modules (Smooth Move) can't tilt or resize it
     recordIsometricPlacement(object);
   }
@@ -286,8 +280,8 @@ function layTokenFlat(token) {
   restoreEffects(token, frame, stagePoint(token.w / 2, token.h / 2));
   if (height > 0) {
     updateTokenVisuals(token, height, canvas.grid.size, canvas.grid.distance);
-    token._isoShadowRadius = SHADOW_RADIUS * Math.min(token.w, token.h);
-    drawStandingShadow(token, shadowCircle(token.center.x, token.center.y, token._isoShadowRadius));
+    const radius = token._isoShadowRadius = SHADOW_RADIUS * Math.min(token.w, token.h);
+    drawStandingShadow(token, token.center, { a: radius, b: 0, c: 0, d: radius });
     recordIsometricPlacement(token);   // walk animations keep it in the air
   } else {
     removeTokenVisuals(token);
@@ -296,10 +290,27 @@ function layTokenFlat(token) {
   }
 }
 
-// The token is no longer isometric: nothing of it stays upright
+// The anchor Foundry gives the mesh: of the token art (Token#_refreshMesh), of the tile shape (Tile#_refreshSize)
+function foundryAnchor(object) {
+  const doc = object.document;
+  const source = (object instanceof canvasTile) ? (doc.shape ?? doc.texture) : doc.texture;
+  return { x: source?.anchorX ?? 0.5, y: source?.anchorY ?? 0.5 };
+}
+
+// The token is no longer isometric: nothing of it stays upright (its own image, no shadow or elevation line, and
+// nothing for the animation guard to keep in place)
 function leaveIsometric(token) {
+  const mesh = token.mesh;
   removeStandingShadow(token);
+  removeTokenVisuals(token);
   restoreEffects(token);
+  if (!mesh || mesh.destroyed) return;
+  if (mesh._isoOwnTexture) {
+    useStandingImage(token, null);
+    token._refreshMeshSizeAndScale?.();
+  }
+  delete mesh._isoPlacement;
+  delete mesh._isoStandingAnchor;
 }
 
 // The linear part of the isometric stage transform, without the zoom (as PIXI builds it from rotation and skew)
