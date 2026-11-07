@@ -1111,18 +1111,9 @@ function placeToken(object, center, bounce = 1) {
 
     const s = stretch(J);
     const lift = state.heightAdjust ? s * Math.max(doc.elevation ?? 0, 0) * canvas.grid.size / canvas.grid.distance : 0;
-    // The lift in token coordinates (the token is slanted like its cell): the lifted art can be clicked too
+    // The lift in token coordinates (the token is slanted like its cell), for the status icons flying with the art
     const liftX = (J.xy * lift) / det;
     const liftY = (-J.xx * lift) / det;
-    // (its shape read when tested: it can be placed before Foundry has built the shape)
-    if (lift) {
-      object.hitArea = {
-        contains: (x, y) => {
-          const shape = object.shape;
-          return !!shape && (shape.contains(x, y) || shape.contains(x - liftX, y - liftY));
-        }
-      };
-    } else if (object.shape) object.hitArea = object.shape;
 
     const angle = Math.toRadians(doc.lockRotation ? 0 : doc.rotation);
     const cos = Math.cos(angle);
@@ -1168,16 +1159,12 @@ function placeToken(object, center, bounce = 1) {
   mesh.transform.setFromMatrix(meshMatrix);
   drawElevationMarker(object, s, meshMatrix, { x: -s * right, y: s * up }, s * lift);
 
-  // Let the standing art be clicked, not only its footprint (token-local, unscaled px)
+  // Where the art is (token-local, unscaled px), for its column of status icons
   const artWidth = Math.abs(base.x) * mesh.texture.width;
   const artHeight = Math.abs(base.y) * mesh.texture.height;
   const artLeft = (width / 2) + right - (artWidth / 2);
   const artRight = artLeft + artWidth;
   const artTop = (height / 2) - up - artHeight;
-  const left = Math.min(0, artLeft);
-  const rightEdge = Math.max(width, artRight);
-  const top = Math.min(0, artTop);
-  object.hitArea = new PIXI.Rectangle(left, top, rightEdge - left, height - top);
   layoutStandingEffects(object, artLeft, artRight, artTop, artHeight);
   drawFootprint(object, center, (q) => ({
     x: object.pivot.x + ((q.x - object.position.x) / s),
@@ -1187,15 +1174,24 @@ function placeToken(object, center, bounce = 1) {
   recordPlacement(object, center);
 }
 
-// The selection border follows the cells the token stands on, as drawn in perspective: the cells it is snapped to,
-// so the border lies on the grid lines (centered on them, not outside of them).
+// The token is selected on the floor only: its selection border follows the cells it stands on, as drawn in
+// perspective, and it answers hover and clicks there, also when its art stands up or flies above them.
 // `toLocal` turns a picture point into the token's own coordinates.
 function drawFootprint(object, center, toLocal) {
+  const footprint = footprintPolygon(object, center, toLocal);
+  const hitArea = footprint ?? object.shape;
+  if (hitArea) object.hitArea = hitArea;
   const border = object.border;
-  if (!border || border.destroyed) return;
+  if (!footprint || !border || border.destroyed) return;
+  foundry.canvas.borders.drawBorder(border, footprint, { alignment: 0.5, dashed: object.document.hidden });
+}
+
+// The cells a token stands on as a polygon in its own coordinates: the cells it is snapped to, so the border lies on
+// the grid lines (centered on them, not outside of them). null where the floor can't be seen.
+function footprintPolygon(object, center, toLocal) {
   const camera = state.current;
   const floor = pictureToFloor(camera, center.x, center.y);
-  if (!floor.valid) return;
+  if (!floor.valid) return null;
   const doc = object.document;
   const { width, height } = doc.getSize();
   const size = canvas.grid.size;
@@ -1212,9 +1208,8 @@ function drawFootprint(object, center, toLocal) {
     const p = floorToPicture(camera, x + (sx * width / 2), y + (sy * height / 2));
     return toLocal(p);
   });
-  if (corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return;
-  foundry.canvas.borders.drawBorder(border, new PIXI.Polygon(corners.flatMap(p => [p.x, p.y])),
-    { alignment: 0.5, dashed: doc.hidden });
+  if (corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
+  return new PIXI.Polygon(corners.flatMap(p => [p.x, p.y]));
 }
 
 // A disc on the floor around a cell center in perspective: the circle of `radius` floor px, seen through the camera
