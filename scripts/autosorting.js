@@ -2,6 +2,7 @@ import {
   isometricModuleConfig,
   OCCLUSION_ELEVATION_OFFSET
 } from "./consts.js";
+import { isWorldIsometric } from "./worldflag.js";
 import {
   sortPlaceableByPosition,
   // debugCanvasLayer,
@@ -45,17 +46,29 @@ export function isoDepthSortTokenMixin(Base) {
   return class DepthSortPlaceable extends Base {
     _refreshState() {
       super._refreshState();
-      applyDepthSort();
+      if (isDepthSortScene()) applyDepthSort();
     }
 
     _onAnimationUpdate(changed, context) {
       super._onAnimationUpdate(changed, context);
-      if (changed.x || changed.y) {
+      if ((changed.x || changed.y) && isDepthSortScene()) {
         applyDepthSort();
       }
     }
 
   };
+}
+
+// The depth sort is for isometric scenes, perspective ones among them. It runs at every refresh of any token's state
+// (a hover, a target, a click, the turn border at each change of turn) and on every frame of a token's movement, and
+// it copies and re-sorts every token on the scene each time. On a flat scene it did all of that for nothing, and wrote
+// an isometric order over Foundry's own: measured in a fight on a flat scene (13 tokens, 12 turns), 245 ms of the 353
+// this module spent. The scene's flag is read first, straight off the document: on a flat scene this is asked many
+// times a turn.
+function isDepthSortScene() {
+  if (isPerspectiveActive()) return true;
+  if (!canvas.scene?.flags?.[isometricModuleConfig.MODULE_ID]?.isometricEnabled) return false;
+  return isWorldIsometric();
 }
 
 export function applyDepthSort() {

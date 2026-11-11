@@ -1,4 +1,5 @@
 import { isometricModuleConfig } from './consts.js';
+import { isWorldIsometric } from './worldflag.js';
 import { cartesianToIso } from './utils.js';
 import { isPerspectiveActive, getPerspectivePathCells } from './perspective.js';
 
@@ -13,7 +14,7 @@ function applyIsometricLabelAdjustments(ctx, token) {
   if (!ctx?.position || !canvas.scene) return ctx;
 
   const isIsometric = canvas.scene.getFlag(isometricModuleConfig.MODULE_ID, "isometricEnabled");
-  const worldIsoEnabled = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag");
+  const worldIsoEnabled = isWorldIsometric();
   if (!worldIsoEnabled || !isIsometric) return ctx;
   // Perspective scenes keep the stage top-down, so the default label position is already correct
   if (isPerspectiveActive()) return ctx;

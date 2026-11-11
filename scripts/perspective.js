@@ -1,4 +1,5 @@
 import { isometricModuleConfig } from './consts.js';
+import { isWorldIsometric } from './worldflag.js';
 
 // ----------------- Vanishing Point Perspective -----------------
 //
@@ -687,8 +688,7 @@ export function installPerspectivePatches() {
   if (typeof originalRefreshBorder === "function") {
     Token.prototype._refreshBorder = function () {
       const scene = this.scene;
-      const isometric = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag")
-        && scene?.getFlag(isometricModuleConfig.MODULE_ID, "isometricEnabled");
+      const isometric = !!scene?.flags?.[isometricModuleConfig.MODULE_ID]?.isometricEnabled && isWorldIsometric();
       if (!isometric || !this.border || !this.shape) return originalRefreshBorder.call(this);
       foundry.canvas.borders.drawBorder(this.border, this.shape, { alignment: 0.5, dashed: this.document.hidden });
     };

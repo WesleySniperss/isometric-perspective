@@ -1,4 +1,5 @@
 import { isometricModuleConfig } from './consts.js';
+import { isWorldIsometric } from './worldflag.js';
 import { 
   cartesianToIso,
   getTileGeometry
@@ -59,7 +60,7 @@ const canvasToken = foundry.canvas.placeables.Token;
 // Function that applies isometric transformation to a token or tile.
 export function applyIsometricTransformation(object, isSceneIsometric) {
   // Don't make any transformation if the isometric module isn't active
-  const isometricWorldEnabled = game.settings.get(isometricModuleConfig.MODULE_ID, "worldIsometricFlag");
+  const isometricWorldEnabled = isWorldIsometric();
   if (!isometricWorldEnabled) return
 
   // Don't make any transformation if there isn't any mesh
