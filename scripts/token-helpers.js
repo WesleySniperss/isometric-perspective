@@ -25,9 +25,10 @@ export function drawElevationLine(graphics, from, to, size) {
   }
 }
 
-// Where a token can be taken with the pointer when it has no cell to be taken by (outside the grid, between cells,
-// outside the map, on a scene without a grid): its place on the floor (`floor`, in the token's own coordinates) and
-// also its art, the whole picture of it. On a cell a token is taken by its cell only.
+// Where a token can be taken with the pointer when it can also be taken by its art (a token of one's own, or one with
+// no cell to be taken by): its place on the floor (`floor`, in the token's own coordinates) and its art, the whole
+// picture of it. The floor comes first: the art only answers where the pointer is on no token's floor, so a click on
+// a cell always takes the token standing there, even under the art of another one.
 const grabPoint = new PIXI.Point();
 export function floorOrArtHitArea(token, floor) {
   return {
@@ -36,7 +37,32 @@ export function floorOrArtHitArea(token, floor) {
       if (floor?.contains(x, y)) return true;
       const mesh = token.mesh;
       if (!mesh || mesh.destroyed || !mesh.visible || !mesh.texture?.valid || (typeof mesh.containsPoint !== "function")) return false;
-      return mesh.containsPoint(token.worldTransform.apply({ x, y }, grabPoint), 0);
+      const point = token.worldTransform.apply({ x, y }, grabPoint);
+      if (!mesh.containsPoint(point, 0)) return false;
+      return !floorUnder(point.x, point.y);
     }
   };
+}
+
+// Is a point of the screen on the floor of some token (its cell, where it is taken). All tokens test the same point
+// while the pointer is hit-tested, so the answer is kept for that point and frame.
+const floorProbe = { x: NaN, y: NaN, frame: NaN, found: false };
+const probePoint = new PIXI.Point();
+function floorUnder(x, y) {
+  const frame = canvas.app?.ticker?.lastTime;
+  if ((floorProbe.x === x) && (floorProbe.y === y) && (floorProbe.frame === frame)) return floorProbe.found;
+  let found = false;
+  for (const token of canvas.tokens?.placeables ?? []) {
+    if (!token.visible || token.destroyed) continue;
+    const area = token.hitArea;
+    const floor = (area && ("floor" in area)) ? area.floor : area;
+    if (!floor?.contains) continue;
+    const local = token.worldTransform.applyInverse({ x, y }, probePoint);
+    if (floor.contains(local.x, local.y)) {
+      found = true;
+      break;
+    }
+  }
+  Object.assign(floorProbe, { x, y, frame, found });
+  return found;
 }

@@ -706,6 +706,38 @@ export function installPerspectivePatches() {
     };
   }
 
+  // A token taken by its art (see token-helpers.js) moves with the pointer from where it was taken. Foundry moves the
+  // token's center to the pointer instead, which would send a standing figure taken by its head a row further back.
+  const originalDragOrigin = Token.prototype._getDragOrigin;
+  const originalInitializeDrag = Token.prototype._initializeDragLeft;
+  const originalDragEnd = Token.prototype._onDragEnd;
+  if ((typeof originalDragOrigin === "function") && (typeof originalInitializeDrag === "function")) {
+    Token.prototype._initializeDragLeft = function (event) {
+      delete this._isoGrabOffset;
+      const area = this.hitArea;
+      const press = event?.interactionData?.origin;
+      if (press && area && (typeof area === "object") && ("floor" in area)) {
+        const local = this.toLocal(press, this.layer);
+        if (!area.floor?.contains(local.x, local.y)) {
+          const center = originalDragOrigin.call(this);
+          this._isoGrabOffset = { x: press.x - center.x, y: press.y - center.y };
+        }
+      }
+      return originalInitializeDrag.call(this, event);
+    };
+    Token.prototype._getDragOrigin = function () {
+      const origin = originalDragOrigin.call(this);
+      const offset = this._isoGrabOffset;
+      return offset ? { x: origin.x + offset.x, y: origin.y + offset.y } : origin;
+    };
+    if (typeof originalDragEnd === "function") {
+      Token.prototype._onDragEnd = function (...args) {
+        delete this._isoGrabOffset;
+        return originalDragEnd.apply(this, args);
+      };
+    }
+  }
+
   // Foundry never snaps while dragging on a gridless scene: snap to the perspective cells anyway (Shift to skip)
   const originalDragWaypoint = Token.prototype._getDragWaypointPosition;
   if (typeof originalDragWaypoint === "function") {
@@ -1211,13 +1243,13 @@ function placeToken(object, center, bounce = 1) {
 }
 
 // The token is selected on the floor: its selection border follows the cells it stands on, as drawn in perspective,
-// and on a cell it answers hover and clicks there only, also when its art stands up or flies above it. Away from the
-// cells (outside the grid, between cells, where the floor can't be seen) there is no cell to find it by, so its art
-// can be taken too. `toLocal` turns a picture point into the token's own coordinates.
+// and it answers hover and clicks there. One's own tokens (that one may move) can be taken by their art too, and so
+// can tokens away from the cells (outside the grid, between cells, where the floor can't be seen), which have no cell
+// to be found by. Others answer on their cell only. `toLocal` turns a picture point into the token's own coordinates.
 function drawFootprint(object, center, toLocal) {
   const { polygon, onCell } = footprintPolygon(object, center, toLocal);
   const floor = polygon ?? object.shape;
-  if (onCell && polygon) object.hitArea = polygon;
+  if (onCell && polygon && !object.isOwner) object.hitArea = polygon;
   else if (floor || object.mesh) object.hitArea = floorOrArtHitArea(object, floor);
   const border = object.border;
   if (!polygon || !border || border.destroyed) return;

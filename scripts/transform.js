@@ -293,11 +293,12 @@ function layTokenFlat(token) {
   setIsometricHitArea(token);
 }
 
-// A token is taken by its cell on the floor, as Foundry does. Without a cell to be taken by (on a scene without a
-// grid, outside the map, between cells) its art can be taken too (see token-helpers.js).
+// A token is taken by its cell on the floor, as Foundry does. One's own tokens (that one may move) can be taken by
+// their art too, and so can tokens without a cell to be taken by (on a scene without a grid, outside the map, between
+// cells). See token-helpers.js.
 function setIsometricHitArea(token) {
   if (!token.shape) return;
-  if (!isAwayFromCells(token)) {
+  if (!token.isOwner && !isAwayFromCells(token)) {
     if (token._isoGrabArea && (token.hitArea === token._isoGrabArea)) token.hitArea = token.shape;
     return;
   }
