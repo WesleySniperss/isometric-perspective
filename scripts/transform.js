@@ -19,9 +19,9 @@ import {
   drawStandingShadow,
   removeStandingShadow,
   SHADOW_RADIUS,
-  drawDashedLine,
   recordIsometricPlacement
 } from './perspective.js';
+import { drawElevationLine, floorOrArtHitArea } from './token-helpers.js';
 
 
 // Main function that changes the scene canvas.
@@ -223,6 +223,7 @@ export function applyIsometricTransformation(object, isSceneIsometric) {
     drawStandingShadow(object, object.center, { a: radius, b: 0, c: 0, d: radius });
     // remembered so movement animations of other modules (Smooth Move) can't tilt or resize it
     recordIsometricPlacement(object);
+    setIsometricHitArea(object);
   }
 
   // If the object is a tile
@@ -280,7 +281,7 @@ function layTokenFlat(token) {
   frame.ty = lift.y;
   restoreEffects(token, frame, stagePoint(token.w / 2, token.h / 2));
   if (height > 0) {
-    updateTokenVisuals(token, height, canvas.grid.size, canvas.grid.distance);
+    updateTokenVisuals(token, height, canvas.grid.size, canvas.grid.distance, true);
     const radius = token._isoShadowRadius = SHADOW_RADIUS * Math.min(token.w, token.h);
     drawStandingShadow(token, token.center, { a: radius, b: 0, c: 0, d: radius });
     recordIsometricPlacement(token);   // walk animations keep it in the air
@@ -289,6 +290,29 @@ function layTokenFlat(token) {
     removeStandingShadow(token);
     delete mesh._isoPlacement;
   }
+  setIsometricHitArea(token);
+}
+
+// A token is taken by its cell on the floor, as Foundry does. Without a cell to be taken by (on a scene without a
+// grid, outside the map, between cells) its art can be taken too (see token-helpers.js).
+function setIsometricHitArea(token) {
+  if (!token.shape) return;
+  if (!isAwayFromCells(token)) {
+    if (token._isoGrabArea && (token.hitArea === token._isoGrabArea)) token.hitArea = token.shape;
+    return;
+  }
+  if ((token.hitArea !== token._isoGrabArea) || (token._isoGrabArea?.floor !== token.shape)) {
+    token.hitArea = token._isoGrabArea = floorOrArtHitArea(token, token.shape);
+  }
+}
+
+function isAwayFromCells(token) {
+  if (canvas.grid.isGridless) return true;
+  const center = token.center;
+  if (!canvas.dimensions.sceneRect.contains(center.x, center.y)) return true;
+  const doc = token.document;
+  const snapped = doc.getSnappedPosition?.({ x: doc.x, y: doc.y });
+  return !!snapped && (Math.hypot(snapped.x - doc.x, snapped.y - doc.y) > canvas.grid.size * 0.2);
 }
 
 // The anchor Foundry gives the mesh: of the token art (Token#_refreshMesh), of the tile shape (Tile#_refreshSize)
@@ -302,6 +326,7 @@ function foundryAnchor(object) {
 // nothing for the animation guard to keep in place)
 function leaveIsometric(token) {
   const mesh = token.mesh;
+  if (token._isoGrabArea && (token.hitArea === token._isoGrabArea) && token.shape) token.hitArea = token.shape;
   removeStandingShadow(token);
   removeTokenVisuals(token);
   restoreEffects(token);
@@ -411,7 +436,8 @@ function isTokenInCurrentScene(tokenId) {
   return canvas.tokens.placeables.some(t => t.id === tokenId);
 }
 
-export function updateTokenVisuals(token, elevacao, gridSize, gridDistance) {
+// `flat`: the token lies flat, lifted, and the line stops at its lower edge instead of crossing its picture
+export function updateTokenVisuals(token, elevacao, gridSize, gridDistance, flat = false) {
   // Primeiro, remova qualquer representação visual existente
   removeTokenVisuals(token);
 
@@ -441,12 +467,19 @@ export function updateTokenVisuals(token, elevacao, gridSize, gridDistance) {
   // Offset da elevação
   const offset = elevacao * (gridSize/gridDistance);
 
+  // Drawn upright on screen (the container undoes the stage), so its dots stay round
   const line = new PIXI.Graphics();
-  const from = { x: centerX, y: centerY };
-  const to = { x: centerX + offset, y: centerY - offset };
-  const dash = { dash: gridSize * 0.1, gap: gridSize * 0.07 };
-  drawDashedLine(line, from, to, { ...dash, width: Math.max(gridSize * 0.03, 1) + 2, color: 0x000000, alpha: 0.3 });
-  drawDashedLine(line, from, to, { ...dash, width: Math.max(gridSize * 0.03, 1), color: 0xFFFFFF, alpha: 0.65 });
+  container.transform.setFromMatrix(inverseStage());
+  const from = stagePoint(centerX, centerY);
+  const to = stagePoint(centerX + offset, centerY - offset);
+  if (flat) {
+    const below = Math.max(Math.abs(stagePoint(token.w / 2, token.h / 2).y), Math.abs(stagePoint(token.w / 2, -token.h / 2).y));
+    const length = Math.hypot(from.x - to.x, from.y - to.y);
+    const k = length ? (Math.min(below, 0.9 * length) / length) : 0;
+    to.x += (from.x - to.x) * k;
+    to.y += (from.y - to.y) * k;
+  }
+  drawElevationLine(line, from, to, gridSize);
   container.addChild(line);
 
   // Adicionar o container ao TOKEN, não ao stage.

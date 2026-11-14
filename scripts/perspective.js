@@ -1,5 +1,6 @@
 import { isometricModuleConfig } from './consts.js';
 import { isWorldIsometric } from './worldflag.js';
+import { drawElevationLine, floorOrArtHitArea } from './token-helpers.js';
 
 // ----------------- Vanishing Point Perspective -----------------
 //
@@ -670,6 +671,7 @@ export function getPerspectivePathCells(waypoints) {
 
 // Wrap Foundry's snapping, keyboard movement and measurement (installed once, on init).
 export function installPerspectivePatches() {
+  Hooks.on("canvasInit", registerStandingTextures);
   const TokenDocument = foundry.documents.TokenDocument;
   const originalSnap = TokenDocument.prototype.getSnappedPosition;
   TokenDocument.prototype.getSnappedPosition = function (data = {}) {
@@ -1026,9 +1028,20 @@ export function getStandingSource(token) {
 export function getStandingImage(token) {
   const src = getStandingSource(token);
   if (!src) return null;
-  const cached = standingTextures.get(src);
-  if (cached instanceof PIXI.Texture) return cached.valid ? cached : null;
+  let cached = standingTextures.get(src);
+  if (cached instanceof PIXI.Texture) {
+    if (isLive(cached)) return cached;
+    // Foundry unloaded the image under it (a scene drawn after it went unused for a while): load it again
+    standingTextures.delete(src);
+    cached = undefined;
+  }
   if (cached === undefined) {
+    // already loaded by Foundry, with the scene (see registerStandingTextures)
+    const ready = (foundry.canvas.getTexture ?? globalThis.getTexture)?.(src);
+    if (isLive(ready)) {
+      standingTextures.set(src, ready);
+      return ready;
+    }
     const load = foundry.canvas.loadTexture ?? globalThis.loadTexture;
     const loading = Promise.resolve(load(src)).then(texture => {
       standingTextures.set(src, texture ?? null);
@@ -1039,6 +1052,28 @@ export function getStandingImage(token) {
     standingTextures.set(src, loading);
   }
   return null;
+}
+
+function isLive(texture) {
+  return (texture instanceof PIXI.Texture) && texture.valid && !!texture.baseTexture && !texture.baseTexture.destroyed;
+}
+
+// The standing art of the tokens of a scene is loaded with it, like the token images: it is there when the tokens are
+// drawn, and Foundry's texture cache, which unloads what the scene doesn't list, keeps it.
+function registerStandingTextures(canvas) {
+  const scene = canvas.scene;
+  const sources = canvas.loadTexturesOptions?.additionalSources;
+  const MODULE_ID = isometricModuleConfig.MODULE_ID;
+  if (!scene || !Array.isArray(sources) || !isWorldIsometric() || !scene.getFlag(MODULE_ID, "isometricEnabled")) return;
+  const standing = readStandingTokens(scene.flags?.[MODULE_ID]);
+  for (const document of scene.tokens) {
+    const pose = document.getFlag(MODULE_ID, "perspectivePose");
+    const stands = (pose === "standing") || ((pose !== "flat")
+      && ((standing === "all") || ((standing === "players") && document.hasPlayerOwner)));
+    if (!stands) continue;
+    const src = getStandingSource({ document, actor: document.actor });
+    if (src && !sources.includes(src)) sources.push(src);
+  }
 }
 
 // Size of the standing art, in canvas px per texture px before any projection. It is as tall as set in the token, in
@@ -1125,7 +1160,8 @@ function placeToken(object, center, bounce = 1) {
     );
     mesh.anchor.set(doc.texture.anchorX, doc.texture.anchorY);
     mesh.transform.setFromMatrix(meshMatrix);
-    drawElevationMarker(object, s, meshMatrix, { x: 0, y: lift }, lift);
+    // the line stops at the lower edge of the token, it doesn't cross its picture
+    drawElevationMarker(object, s, meshMatrix, { x: 0, y: lift }, lift, (Math.abs(J.yx) * halfX) + (Math.abs(J.yy) * halfY));
     if (lift > 0) drawStandingShadow(object, center, floorDisc(J, SHADOW_RADIUS * Math.min(width, height)));
     else removeStandingShadow(object);
     // Status icons stay upright on the slanted token: the effects undo its transform, keeping the size of the floor
@@ -1174,24 +1210,27 @@ function placeToken(object, center, bounce = 1) {
   recordPlacement(object, center);
 }
 
-// The token is selected on the floor only: its selection border follows the cells it stands on, as drawn in
-// perspective, and it answers hover and clicks there, also when its art stands up or flies above them.
-// `toLocal` turns a picture point into the token's own coordinates.
+// The token is selected on the floor: its selection border follows the cells it stands on, as drawn in perspective,
+// and on a cell it answers hover and clicks there only, also when its art stands up or flies above it. Away from the
+// cells (outside the grid, between cells, where the floor can't be seen) there is no cell to find it by, so its art
+// can be taken too. `toLocal` turns a picture point into the token's own coordinates.
 function drawFootprint(object, center, toLocal) {
-  const footprint = footprintPolygon(object, center, toLocal);
-  const hitArea = footprint ?? object.shape;
-  if (hitArea) object.hitArea = hitArea;
+  const { polygon, onCell } = footprintPolygon(object, center, toLocal);
+  const floor = polygon ?? object.shape;
+  if (onCell && polygon) object.hitArea = polygon;
+  else if (floor || object.mesh) object.hitArea = floorOrArtHitArea(object, floor);
   const border = object.border;
-  if (!footprint || !border || border.destroyed) return;
-  foundry.canvas.borders.drawBorder(border, footprint, { alignment: 0.5, dashed: object.document.hidden });
+  if (!polygon || !border || border.destroyed) return;
+  foundry.canvas.borders.drawBorder(border, polygon, { alignment: 0.5, dashed: object.document.hidden });
 }
 
 // The cells a token stands on as a polygon in its own coordinates: the cells it is snapped to, so the border lies on
-// the grid lines (centered on them, not outside of them). null where the floor can't be seen.
+// the grid lines (centered on them, not outside of them), and whether it stands on a cell of the grid. No polygon
+// where the floor can't be seen.
 function footprintPolygon(object, center, toLocal) {
   const camera = state.current;
   const floor = pictureToFloor(camera, center.x, center.y);
-  if (!floor.valid) return null;
+  if (!floor.valid) return { polygon: null, onCell: false };
   const doc = object.document;
   const { width, height } = doc.getSize();
   const size = canvas.grid.size;
@@ -1201,15 +1240,15 @@ function footprintPolygon(object, center, toLocal) {
   // a token placed between cells (no snapping) keeps its border where it is
   const su = onGrid ? snapAxis(u, doc.width, camera.column0, camera.columns) : u;
   const sv = onGrid ? snapAxis(v, doc.height, camera.row0, camera.rows) : v;
-  const onCell = (Math.abs(su - u) < BORDER_SNAP) && (Math.abs(sv - v) < BORDER_SNAP);
+  const onCell = onGrid && (Math.abs(su - u) < BORDER_SNAP) && (Math.abs(sv - v) < BORDER_SNAP);
   const x = onCell ? su * size : floor.x;
   const y = onCell ? sv * size : floor.y;
   const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
     const p = floorToPicture(camera, x + (sx * width / 2), y + (sy * height / 2));
     return toLocal(p);
   });
-  if (corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return null;
-  return new PIXI.Polygon(corners.flatMap(p => [p.x, p.y]));
+  if (corners.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return { polygon: null, onCell: false };
+  return { polygon: new PIXI.Polygon(corners.flatMap(p => [p.x, p.y])), onCell };
 }
 
 // A disc on the floor around a cell center in perspective: the circle of `radius` floor px, seen through the camera
@@ -1289,8 +1328,9 @@ function syncShadow(token) {
 // Tokens lifted by their elevation (Enable Height Adjustment): a dashed line from their cell (and its shadow) up to
 // their art, so it is clear where on the floor a flying token is (Enable Token Visuals). Drawn with the token art,
 // so it is lit, hidden and sorted like it. `art` is the matrix of the art, `ground` the cell center seen from where
-// the art is placed and `lift` its height above the cell, in picture px; `s` is the size of the floor there.
-function drawElevationMarker(object, s, art, ground, lift) {
+// the art is placed and `lift` its height above the cell, in picture px; `s` is the size of the floor there. The line
+// ends `clearance` px below the art's anchor (a flat token's lower edge).
+function drawElevationMarker(object, s, art, ground, lift, clearance = 0) {
   const mesh = object.mesh;
   if (!(lift > 0) || !game.settings.get(isometricModuleConfig.MODULE_ID, "enableTokenVisuals")) {
     removeElevationMarker(object);
@@ -1308,10 +1348,7 @@ function drawElevationMarker(object, s, art, ground, lift) {
   marker.transform.setFromMatrix(markerMatrix.set(art.d / det, -art.b / det, -art.c / det, art.a / det, 0, 0));
   marker.clear();
 
-  const top = { x: ground.x, y: ground.y - lift };
-  const size = canvas.grid.size * s;
-  drawDashedLine(marker, ground, top, { width: Math.max(size * 0.04, 1) + 2, dash: size * 0.08, gap: size * 0.06, color: 0x000000, alpha: 0.3 });
-  drawDashedLine(marker, ground, top, { width: Math.max(size * 0.04, 1), dash: size * 0.08, gap: size * 0.06, color: 0xFFFFFF, alpha: 0.65 });
+  drawElevationLine(marker, ground, { x: ground.x, y: ground.y - lift + Math.min(Math.max(clearance, 0), lift * 0.9) }, canvas.grid.size * s);
 }
 
 function removeElevationMarker(object) {
